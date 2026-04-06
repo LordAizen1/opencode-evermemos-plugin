@@ -1,8 +1,14 @@
-import type { Plugin } from "@opencode-ai/plugin"
+import { tool, type Plugin } from "@opencode-ai/plugin"
 import { EverMemOSClient } from "./client.js"
 import { loadConfig } from "./config.js"
 import { computeGroupId } from "./git.js"
-import { formatRecalledMemories, buildToolSummary } from "./memory.js"
+import {
+  formatCompactionMemories,
+  formatProfileMemories,
+  formatRecalledMemories,
+  mergeRecallBlocks,
+  buildToolSummary,
+} from "./memory.js"
 import { sanitize } from "./sanitize.js"
 import {
   cacheUserMessage,
@@ -10,28 +16,111 @@ import {
   pruneExpired,
 } from "./session-cache.js"
 
+const z = tool.schema
+
 /**
  * OpenCode EverMemOS Plugin
  *
  * Gives the OpenCode model durable, per-project memory powered by EverMemOS.
  *
  * Hook wiring:
- *  - chat.message          → cache sanitized user message; fire-and-forget store
- *  - experimental.chat.system.transform → recall memories, inject into system prompt
- *  - tool.execute.after    → fire-and-forget store of tool summaries
- *  - event (session.idle)  → prune expired session cache entries
+ *  - chat.message -> cache sanitized user message; fire-and-forget store
+ *  - experimental.chat.system.transform -> recall memories, inject into system prompt
+ *  - experimental.session.compacting -> add compact recall context for compaction
+ *  - tool.execute.after -> fire-and-forget store of tool summaries
+ *  - event (session.idle) -> prune expired session cache entries
  */
 const plugin: Plugin = async (input) => {
   const config = loadConfig()
   const client = new EverMemOSClient(config)
   const groupId = await computeGroupId(
-    input.$ as any,       // BunShell tagged-template callable
+    input.$ as any, // BunShell tagged-template callable
     input.directory,
   )
 
   return {
+    tool: {
+      evermemos_recall: tool({
+        description:
+          "Recall relevant project memories from EverMemOS for the current repository scope.",
+        args: {
+          query: z.string().min(1).describe("What to recall"),
+          top_k: z.number().int().positive().max(20).optional(),
+        },
+        execute: async (args) => {
+          const query = sanitize(args.query, { maxLength: 1024 })
+          if (!query) return "No query provided after sanitization."
+
+          const response = await client.search({
+            query,
+            group_id: groupId,
+            retrieve_method: config.retrieveMethod,
+            top_k: args.top_k ?? config.recallTopK,
+          })
+
+          if (!response) return "EverMemOS unavailable or timed out."
+          if (response.result.total_count === 0) return "No matching memories found."
+
+          const block = formatRecalledMemories(response)
+          if (!block) return "No matching memories found."
+
+          return block.length > 4000 ? `${block.slice(0, 4000)}\n...[truncated]` : block
+        },
+      }),
+
+      evermemos_remember: tool({
+        description:
+          "Store a durable memory entry in EverMemOS for the current repository scope.",
+        args: {
+          content: z.string().min(1).describe("Memory content to store"),
+          role: z.enum(["user", "assistant"]).optional(),
+        },
+        execute: async (args) => {
+          const content = sanitize(args.content, { maxLength: config.toolOutputMaxChars })
+          if (!content) return "Nothing to store after sanitization."
+
+          const result = await client.memorize({
+            message_id: `manual-${Date.now()}`,
+            create_time: new Date().toISOString(),
+            sender: config.senderId,
+            content,
+            group_id: groupId,
+            role: args.role ?? "user",
+          })
+
+          if (!result) return "Failed to store memory (EverMemOS unavailable or timed out)."
+          return "Memory stored successfully."
+        },
+      }),
+
+      evermemos_forget: tool({
+        description:
+          "Delete memories in EverMemOS by event_id, user_id, or current project scope.",
+        args: {
+          event_id: z.string().optional(),
+          user_id: z.string().optional(),
+          current_project_only: z.boolean().optional(),
+        },
+        execute: async (args) => {
+          const payload = {
+            event_id: args.event_id,
+            user_id: args.user_id,
+            group_id: args.current_project_only ? groupId : undefined,
+          }
+
+          if (!payload.event_id && !payload.user_id && !payload.group_id) {
+            return "Refusing broad delete: provide event_id, user_id, or current_project_only=true."
+          }
+
+          const result = await client.deleteMemories(payload)
+          if (!result) return "Failed to delete memories (EverMemOS unavailable or timed out)."
+          return "Delete request sent successfully."
+        },
+      }),
+    },
+
     // ------------------------------------------------------------------
-    // chat.message — cache the user message for recall; store it async
+    // chat.message - cache the user message for recall; store it async
     // ------------------------------------------------------------------
     "chat.message": async (_hookInput, output) => {
       const text = extractUserText(output)
@@ -52,12 +141,12 @@ const plugin: Plugin = async (input) => {
           role: "user",
         })
         .catch(() => {
-          /* fail open — never crash the chat */
+          /* fail open - never crash the chat */
         })
     },
 
     // ------------------------------------------------------------------
-    // experimental.chat.system.transform — recall & inject memories
+    // experimental.chat.system.transform - recall and inject memories
     // ------------------------------------------------------------------
     "experimental.chat.system.transform": async (hookInput, output) => {
       const sessionId = hookInput.sessionID
@@ -66,23 +155,54 @@ const plugin: Plugin = async (input) => {
       const query = getCachedUserMessage(sessionId)
       if (!query) return
 
+      const [searchResponse, profileMemories] = await Promise.all([
+        client.search({
+          query,
+          group_id: groupId,
+          retrieve_method: config.retrieveMethod,
+          top_k: config.recallTopK,
+        }),
+        config.injectProfileRecall
+          ? client.listProfileMemories(groupId, config.profileRecallLimit)
+          : Promise.resolve([]),
+      ])
+
+      const episodicBlock =
+        searchResponse && searchResponse.result.total_count > 0
+          ? formatRecalledMemories(searchResponse)
+          : ""
+      const profileBlock = config.injectProfileRecall
+        ? formatProfileMemories(profileMemories, config.profileRecallLimit)
+        : ""
+      const merged = mergeRecallBlocks(episodicBlock, profileBlock)
+
+      if (merged) output.system.push(merged)
+    },
+
+    // ------------------------------------------------------------------
+    // experimental.session.compacting - add concise recall context
+    // ------------------------------------------------------------------
+    "experimental.session.compacting": async (hookInput, output) => {
+      const query = getCachedUserMessage(hookInput.sessionID)
+      if (!query) return
+
       const response = await client.search({
         query,
         group_id: groupId,
         retrieve_method: config.retrieveMethod,
-        top_k: config.recallTopK,
+        top_k: Math.min(config.recallTopK, 4),
       })
 
       if (!response || response.result.total_count === 0) return
 
-      const block = formatRecalledMemories(response)
-      if (block) {
-        output.system.push(block)
+      const compactBlock = formatCompactionMemories(response, 4, 1200)
+      if (compactBlock) {
+        output.context.push(compactBlock)
       }
     },
 
     // ------------------------------------------------------------------
-    // tool.execute.after — store a summary of tool results as memory
+    // tool.execute.after - store a summary of tool results as memory
     // ------------------------------------------------------------------
     "tool.execute.after": async (hookInput, output) => {
       const summary = buildToolSummary(
@@ -109,7 +229,7 @@ const plugin: Plugin = async (input) => {
     },
 
     // ------------------------------------------------------------------
-    // event — listen for session.idle to prune cache
+    // event - listen for session.idle to prune cache
     // ------------------------------------------------------------------
     event: async ({ event }) => {
       if (event.type === "session.idle") {

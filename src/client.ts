@@ -1,5 +1,6 @@
 import type {
   PluginConfig,
+  RecalledMemory,
   MemorizeMessagePayload,
   MemorizeResponse,
   SearchMemoriesPayload,
@@ -25,11 +26,44 @@ export class EverMemOSClient {
 
   /** Search memories — used during recall before LLM prompt. */
   async search(payload: SearchMemoriesPayload): Promise<SearchMemoriesResponse | null> {
-    return this.post<SearchMemoriesResponse>(
-      "/api/v1/memories/search",
-      payload,
-      this.recallTimeoutMs,
+    const params = new URLSearchParams({
+      query: payload.query,
+      group_id: payload.group_id,
+      retrieve_method: payload.retrieve_method,
+      top_k: String(payload.top_k),
+    })
+    if (payload.include_metadata !== undefined) {
+      params.set("include_metadata", String(payload.include_metadata))
+    }
+    for (const t of payload.memory_types ?? []) {
+      params.append("memory_types", t)
+    }
+
+    return this.request<SearchMemoriesResponse>(
+      `/api/v1/memories/search?${params.toString()}`,
+      {
+        method: "GET",
+        signal: AbortSignal.timeout(this.recallTimeoutMs),
+      },
     )
+  }
+
+  /** Fetch profile memories separately from search endpoint. */
+  async listProfileMemories(groupId: string, limit: number): Promise<RecalledMemory[]> {
+    const params = new URLSearchParams({
+      group_id: groupId,
+      memory_type: "profile",
+      limit: String(limit),
+    })
+
+    const response = await this.request<unknown>(
+      `/api/v1/memories?${params.toString()}`,
+      {
+        method: "GET",
+        signal: AbortSignal.timeout(this.recallTimeoutMs),
+      },
+    )
+    return extractMemories(response)
   }
 
   /** Store a single message as memory. */
@@ -84,4 +118,42 @@ export class EverMemOSClient {
       return null
     }
   }
+}
+
+function extractMemories(value: unknown): RecalledMemory[] {
+  const out: RecalledMemory[] = []
+
+  const visit = (node: unknown): void => {
+    if (!node) return
+    if (Array.isArray(node)) {
+      for (const item of node) visit(item)
+      return
+    }
+    if (typeof node !== "object") return
+
+    const obj = node as Record<string, unknown>
+    const memoryType = typeof obj.memory_type === "string" ? obj.memory_type : undefined
+    const content = typeof obj.content === "string" ? obj.content : undefined
+    const summary = typeof obj.summary === "string" ? obj.summary : undefined
+    const atomicFact = typeof obj.atomic_fact === "string" ? obj.atomic_fact : undefined
+
+    if (memoryType && (content || summary || atomicFact)) {
+      out.push({
+        memory_type: memoryType,
+        content,
+        summary,
+        atomic_fact: atomicFact,
+        timestamp: typeof obj.timestamp === "string" ? obj.timestamp : undefined,
+        user_id: typeof obj.user_id === "string" ? obj.user_id : undefined,
+        group_id: typeof obj.group_id === "string" ? obj.group_id : undefined,
+      })
+    }
+
+    for (const child of Object.values(obj)) {
+      visit(child)
+    }
+  }
+
+  visit(value)
+  return out
 }

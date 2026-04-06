@@ -15,6 +15,10 @@ export interface PluginConfig {
   retrieveMethod: RetrieveMethod
   /** Number of memories to recall per query. Default: 5 */
   recallTopK: number
+  /** Whether to fetch profile memories separately from search. Default: true */
+  injectProfileRecall: boolean
+  /** Maximum number of profile memories to inject. Default: 3 */
+  profileRecallLimit: number
   /** Stable sender ID written into EverMemOS messages */
   senderId: string
 }
@@ -42,7 +46,7 @@ export interface MemorizeMessagePayload {
   refer_list?: string[]
 }
 
-/** GET /api/v1/memories/search — query params / body */
+/** GET /api/v1/memories/search query payload */
 export interface SearchMemoriesPayload {
   query: string
   group_id: string
@@ -117,3 +121,4 @@ export interface SanitizeOptions {
   /** Whether to redact common secret patterns. Default: true */
   redactSecrets?: boolean
 }
+

@@ -5,7 +5,7 @@ import { basename } from "node:path"
  * Compute a stable groupId for EverMemOS scoping.
  *
  * Strategy:
- *  1. Hash the git remote origin URL (strips credentials, normalises)
+ *  1. Hash the git remote origin URL as returned by git
  *  2. Fall back to hashing the directory basename if no remote exists
  *
  * The Bun shell `$` from PluginInput is used instead of child_process.

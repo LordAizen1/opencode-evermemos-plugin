@@ -24,6 +24,62 @@ export function formatRecalledMemories(response: SearchMemoriesResponse): string
 }
 
 /**
+ * Format profile memories fetched from list/get endpoints.
+ */
+export function formatProfileMemories(
+  memories: RecalledMemory[],
+  maxLines = 3,
+  maxChars = 1000,
+): string {
+  if (memories.length === 0) return ""
+
+  const lines = memories.slice(0, maxLines).map((m, i) => {
+    const body = (m.summary ?? m.content ?? m.atomic_fact ?? "").replace(/\s+/g, " ").trim()
+    const clipped = body.length > 260 ? `${body.slice(0, 260)}...[truncated]` : body
+    return `${i + 1}. ${clipped}`
+  })
+
+  const block = [
+    "## Recalled profile memories",
+    "",
+    ...lines,
+  ].join("\n")
+
+  return block.length > maxChars ? `${block.slice(0, maxChars)}\n...[truncated]` : block
+}
+
+export function mergeRecallBlocks(...blocks: string[]): string {
+  const nonEmpty = blocks.map((b) => b.trim()).filter(Boolean)
+  return nonEmpty.join("\n\n")
+}
+
+/**
+ * Format compact memory context for compaction prompts.
+ * Keeps output brief to avoid competing with compaction instructions.
+ */
+export function formatCompactionMemories(
+  response: SearchMemoriesResponse,
+  maxLines = 4,
+  maxChars = 1200,
+): string {
+  const flat = flattenMemories(response)
+  if (flat.length === 0) return ""
+
+  const lines = flat.slice(0, maxLines).map((m) => {
+    const body = (m.summary ?? m.atomic_fact ?? m.content ?? "").replace(/\s+/g, " ").trim()
+    const clipped = body.length > 240 ? `${body.slice(0, 240)}...[truncated]` : body
+    return `- [${m.memory_type}] ${clipped}`
+  })
+
+  const block = [
+    "Relevant prior project memories:",
+    ...lines,
+  ].join("\n")
+
+  return block.length > maxChars ? `${block.slice(0, maxChars)}\n...[truncated]` : block
+}
+
+/**
  * Build a concise summary string from a tool execution result
  * suitable for storing as memory content.
  */
@@ -37,7 +93,7 @@ export function buildToolSummary(
   const argsStr = typeof args === "string" ? args : JSON.stringify(args ?? {})
   const truncatedOutput =
     output.length > maxChars
-      ? output.slice(0, maxChars) + "…[truncated]"
+      ? output.slice(0, maxChars) + "...[truncated]"
       : output
 
   return [

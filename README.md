@@ -2,27 +2,39 @@
 
 Durable project memory for OpenCode using EverMemOS.
 
-This plugin captures sanitized user/tool context, stores it in EverMemOS, and recalls relevant memories into the system prompt on later turns.
+The plugin captures sanitized user and tool context, stores it in EverMemOS, and automatically recalls relevant memories into the system prompt on every turn — no explicit commands needed. Memory is scoped per repository and persists across sessions.
 
-## What it currently does
+## How it works
 
-- Captures user text in `chat.message`, sanitizes it, caches by session, and stores it in EverMemOS.
-- Recalls memories in `experimental.chat.system.transform` using the cached latest user message.
-- Fetches profile memories through a separate `/api/v1/memories` path and merges them into recall injection.
-- Adds compact recalled context during `experimental.session.compacting`.
-- Captures tool outcomes in `tool.execute.after` as bounded summaries.
-- Prunes stale session cache entries on `session.idle`.
-- Exposes explicit memory tools for manual recall, store, and delete operations.
-- Fails open for network/timeouts so chat flow is not blocked by EverMemOS issues.
+### Passive (automatic, no user action required)
 
-## Explicit tools
+- Every user message is sanitized and stored in EverMemOS silently in the background.
+- Before each model response, relevant memories from past sessions are recalled and injected into the system prompt automatically via `experimental.chat.system.transform`.
+- Tool outcomes (file edits, bash results) are summarized and stored after execution.
+- During session compaction (context overflow), recalled memories are added to the compaction context so nothing important is lost.
+- Session cache is pruned on idle to prevent unbounded memory growth.
 
-- `evermemos_recall(query, top_k?)`
-  Recall memories for the current project scope and return a compact summary block.
-- `evermemos_remember(content, role?)`
-  Sanitize and store a memory entry (`role`: `user` or `assistant`).
-- `evermemos_forget(event_id?, user_id?, current_project_only?)`
-  Delete by `event_id`, by `user_id`, or by current project scope.
+### Explicit (model-controlled tools)
+
+The model can also call memory tools directly when the user asks for targeted recall, wants to save something explicitly, or wants to clean up memories:
+
+- `evermemos_recall(query, top_k?)` — recall relevant memories for the current project and return a compact summary
+- `evermemos_remember(content, role?)` — sanitize and store a memory entry explicitly
+- `evermemos_forget(event_id?, user_id?, current_project_only?)` — delete by event, user, or wipe the current project scope
+
+### Project isolation
+
+Memory is scoped per repository using a stable `group_id` derived from the git remote origin URL (SHA-256, first 16 chars). Renaming the local folder does not change the scope. Repos without a remote fall back to a hash of the directory name.
+
+### Local memory lane
+
+Explicit `evermemos_remember` writes are also persisted locally at:
+
+- Linux/macOS: `~/.config/opencode/evermemos-local.json`
+- Windows: `%USERPROFILE%\.config\opencode\evermemos-local.json`
+- Override: `EVERMEMOS_LOCAL_STORE_PATH`
+
+This gives fast, deterministic recall for explicitly stored preferences even when EverMemOS retrieval is slow or noisy. Local hits are merged ahead of backend results in recall output.
 
 ## Requirements
 
@@ -34,22 +46,18 @@ This plugin captures sanitized user/tool context, stores it in EverMemOS, and re
 
 ```bash
 npm install
-npm run typecheck
+npm run build
 ```
 
 ## Configuration
 
-Configuration is loaded with precedence:
-
-1. Environment variables
-2. JSONC config file
-3. Built-in defaults
+Configuration precedence: **env vars > JSONC file > built-in defaults**
 
 Default config file path:
 
 - Linux/macOS: `~/.config/opencode/evermemos.jsonc`
 - Windows: `%USERPROFILE%\.config\opencode\evermemos.jsonc`
-- Optional override path: `EVERMEMOS_CONFIG_PATH`
+- Override: `EVERMEMOS_CONFIG_PATH`
 
 Recommended JSONC config (local EverMemOS on `:1995`):
 
@@ -67,20 +75,22 @@ Recommended JSONC config (local EverMemOS on `:1995`):
 }
 ```
 
-- Built-in `baseUrl` fallback is `http://localhost:8000`, but for EverMemOS local API you should set `http://localhost:1995`.
+> Built-in `baseUrl` default is `http://localhost:8000`. For local EverMemOS set `http://localhost:1995`.
 
 Supported env vars:
 
-- `EVERMEMOS_BASE_URL` (fallback default: `http://localhost:8000`)
-- `EVERMEMOS_CONFIG_PATH` (optional, path to JSONC config file)
-- `EVERMEMOS_RECALL_TIMEOUT_MS` (default: `300`)
-- `EVERMEMOS_WRITE_TIMEOUT_MS` (default: `500`)
-- `EVERMEMOS_TOOL_OUTPUT_MAX_CHARS` (default: `2048`)
-- `EVERMEMOS_RETRIEVE_METHOD` (default: `hybrid`, allowed: `keyword|vector|hybrid|rrf`)
-- `EVERMEMOS_RECALL_TOP_K` (default: `5`)
-- `EVERMEMOS_INJECT_PROFILE_RECALL` (default: `true`)
-- `EVERMEMOS_PROFILE_RECALL_LIMIT` (default: `3`)
-- `EVERMEMOS_SENDER_ID` (default: `opencode-user`)
+| Variable | Default | Description |
+|---|---|---|
+| `EVERMEMOS_BASE_URL` | `http://localhost:8000` | EverMemOS server URL |
+| `EVERMEMOS_CONFIG_PATH` | — | Override path to JSONC config |
+| `EVERMEMOS_RECALL_TIMEOUT_MS` | `300` | Timeout for recall requests (ms) |
+| `EVERMEMOS_WRITE_TIMEOUT_MS` | `500` | Timeout for write requests (ms) |
+| `EVERMEMOS_TOOL_OUTPUT_MAX_CHARS` | `2048` | Max chars per stored tool summary |
+| `EVERMEMOS_RETRIEVE_METHOD` | `hybrid` | `keyword\|vector\|hybrid\|rrf` |
+| `EVERMEMOS_RECALL_TOP_K` | `5` | Number of memories to recall |
+| `EVERMEMOS_INJECT_PROFILE_RECALL` | `true` | Fetch and inject profile memories |
+| `EVERMEMOS_PROFILE_RECALL_LIMIT` | `3` | Max profile memories to inject |
+| `EVERMEMOS_SENDER_ID` | `opencode-user` | Sender ID written to EverMemOS |
 
 Windows PowerShell example:
 
@@ -88,11 +98,17 @@ Windows PowerShell example:
 $env:EVERMEMOS_BASE_URL = "http://localhost:1995"
 $env:EVERMEMOS_RETRIEVE_METHOD = "keyword"
 $env:EVERMEMOS_RECALL_TOP_K = "5"
-$env:EVERMEMOS_INJECT_PROFILE_RECALL = "true"
-$env:EVERMEMOS_PROFILE_RECALL_LIMIT = "3"
 ```
 
-OpenCode plugin registration (`%USERPROFILE%\.config\opencode\opencode.json`):
+## Load in OpenCode
+
+Build the plugin:
+
+```bash
+npm run build
+```
+
+Register in OpenCode config (`%USERPROFILE%\.config\opencode\opencode.json`):
 
 ```json
 {
@@ -101,7 +117,18 @@ OpenCode plugin registration (`%USERPROFILE%\.config\opencode\opencode.json`):
 }
 ```
 
-Known-good EverMemOS `.env` block (OpenAI-only path):
+Open any repository with a git `origin` remote and start chatting — the plugin activates automatically.
+
+## EverMemOS setup
+
+Start EverMemOS locally (Windows):
+
+```powershell
+$env:PYTHONIOENCODING="utf-8"
+py -m uv run python src/run.py --port 1995
+```
+
+Known-good `.env` block (OpenAI-only path):
 
 ```dotenv
 # LLM extraction
@@ -110,93 +137,59 @@ LLM_BASE_URL=https://api.openai.com/v1
 LLM_MODEL=gpt-4.1-mini
 LLM_API_KEY=sk-REPLACE_ME
 
-# Embeddings (OpenAI-compatible endpoint through EverMemOS vllm provider path)
+# Embeddings
 VECTORIZE_PROVIDER=vllm
 VECTORIZE_BASE_URL=https://api.openai.com/v1
 VECTORIZE_MODEL=text-embedding-3-small
 VECTORIZE_API_KEY=sk-REPLACE_ME
 
-# Keep fallbacks disabled for this minimal path
 VECTORIZE_FALLBACK_PROVIDER=none
 RERANK_FALLBACK_PROVIDER=none
 ```
 
-EverMemOS OpenAI compatibility note:
-- If EverMemOS uses `LLM_BASE_URL=https://api.openai.com/v1`, ensure in
-  `C:\Users\<your-user>\Desktop\my_projects\EverMemOS-main\src\memory_layer\llm\openai_provider.py`
-  that request body field `"provider"` is only sent for OpenRouter URLs.
-- OpenAI API may reject unknown `provider` with HTTP 400.
+**OpenAI compatibility note:** If using `LLM_BASE_URL=https://api.openai.com/v1`, ensure the `"provider"` field in `openai_provider.py` is only sent for OpenRouter URLs. The OpenAI API rejects unknown fields with HTTP 400.
 
-## Load in local OpenCode
+## Validated behavior
 
-1. Build or run OpenCode from your local source checkout.
-2. Add this plugin to your OpenCode plugin configuration using the local path of this repository.
-3. Start OpenCode and open a repo directory with a git `origin` remote.
+### Cross-session passive recall (confirmed)
 
-The plugin computes `group_id` from `git remote get-url origin` (SHA-256 short hash), with directory-name fallback when no remote exists.
+In a fresh session with no prior context, asking *"what's my coding preference for this project?"* returned the correct answer from memories stored in a previous session — without any explicit tool call. The model answered naturally from injected system prompt context.
+
+### Explicit tool round-trip (confirmed)
+
+```
+User: evermemos_remember "User prefers small focused patches and TypeScript strict mode"
+→ Memory stored successfully.
+
+User: evermemos_recall query "coding preference"
+→ ## Recalled project memories
+  1. [episodic_memory] ... React, TypeScript, Tailwind CSS preferences ...
+  2. [local_memory] User prefers small focused patches and TypeScript strict mode
+```
+
+### Meta-noise prevention (confirmed)
+
+Plugin tool calls (`evermemos_recall`, `evermemos_remember`, `evermemos_forget`) are never stored as memories. User messages that look like plugin invocations are also skipped. This prevents recall results from being polluted with entries like *"User called evermemos_remember..."*.
 
 ## Manual E2E test plan
 
 1. Start EverMemOS locally.
-2. Start local OpenCode with this plugin enabled.
-3. In a test repository, send a project-specific user message.
-4. Ask a follow-up question that should benefit from recall.
-5. Perform a tool action (for example, an edit) and verify a tool summary is stored.
-6. Send text containing `<private>secret</private>` and confirm private block redaction.
-7. Stop EverMemOS and continue chatting; verify plugin fails open (no chat crash, recall may be skipped).
-8. Re-enable EverMemOS and verify writes/recall recover.
-
-## Real Session Example (Sanitized)
-
-A full exported run is included at:
-- `session-ses_29db.md`
-
-In this run, the plugin tools were used successfully end-to-end:
-
-1. `evermemos_remember` stored project preferences:
-   - "React + TypeScript + Tailwind CSS"
-   - "small, focused patches; no unrelated refactors"
-2. `evermemos_recall` returned recalled episodic memories for:
-   - query: `"project stack and patch style"`
-   - query: `"commit message preference"`
-3. `evermemos_remember` stored:
-   - `"User prefers concise commit messages."`
-4. `evermemos_forget` with `current_project_only=true` returned:
-   - `Delete request sent successfully.`
-
-The session also includes a privacy test message using `<private>...</private>` to validate secret-safe handling behavior.
-
-Expected output (sample):
-
-```text
-Tool: evermemos_remember
-Input:  {"content":"User prefers concise commit messages."}
-Output: Memory stored successfully.
-
-Tool: evermemos_recall
-Input:  {"query":"commit message preference"}
-Output:
-## Recalled project memories
-1. [episodic_memory] ... user instructed evermemos_remember ...
-2. [episodic_memory] ... coding preferences for portfolio project ...
-
-Tool: evermemos_forget
-Input:  {"current_project_only":true}
-Output: Delete request sent successfully.
-```
+2. Build the plugin (`npm run build`) and register it in OpenCode config.
+3. Open a repo with a git `origin` remote in OpenCode.
+4. Send a message with project-specific context (e.g. stack preferences).
+5. Close the session. Open a new session in the same repo.
+6. Ask naturally — e.g. *"what's my preferred stack?"* — without any tool calls.
+7. Verify the model answers correctly from injected recalled memories.
+8. Test explicit tools: `evermemos_remember`, `evermemos_recall`, `evermemos_forget`.
+9. Send a message containing `<private>secret</private>` and confirm it is not stored.
+10. Stop EverMemOS and verify chat continues without crashing (fail-open).
 
 ## Privacy behavior
 
-All outbound memory content goes through `sanitize()`:
+All content sent to EverMemOS passes through `sanitize()`:
 
-- strips `<private>...</private>` blocks
-- redacts common secret/token patterns
-- truncates oversized content
+- Strips `<private>...</private>` blocks
+- Redacts API keys, tokens, bearer credentials, PEM private keys, and credential URLs
+- Truncates oversized content to configured max length
 
-Use conservative review when storing command output or logs that may include sensitive values.
-
-## Current limitations
-
-Not implemented yet:
-
-- no major planned gaps from the original roadmap remain
+Plugin tool invocations and messages referencing plugin tools are never stored, preventing meta-noise accumulation over time.

@@ -4,6 +4,17 @@ Durable project memory for OpenCode using EverMemOS.
 
 The plugin captures sanitized user and tool context, stores it in EverMemOS, and automatically recalls relevant memories into the system prompt on every turn — no explicit commands needed. Memory is scoped per repository and persists across sessions.
 
+## Why EverMemOS
+
+Most OpenCode memory plugins (opencode-mem, opencode-supermemory, opencode-mem0) store raw text in a vector database and retrieve it by similarity. EverMemOS does something fundamentally different — it runs an LLM extraction pipeline over your conversations and produces structured memory types:
+
+- **Episodic memory** — summarised past events with participants, timestamps, and key facts
+- **Profile memory** — stable user traits and preferences extracted over time
+- **Foresight** — forward-looking intentions and planned work
+- **Event log** — atomic facts distilled from conversation history
+
+This means recall isn't just "find similar text" — it's "here is what you've been working on, what you prefer, and what you planned to do next." That context is injected into the system prompt before every model response, making the assistant genuinely aware of your project history without you repeating yourself.
+
 ## How it works
 
 ### Passive (automatic, no user action required)
@@ -34,20 +45,85 @@ Explicit `evermemos_remember` writes are also persisted locally at:
 - Windows: `%USERPROFILE%\.config\opencode\evermemos-local.json`
 - Override: `EVERMEMOS_LOCAL_STORE_PATH`
 
-This gives fast, deterministic recall for explicitly stored preferences even when EverMemOS retrieval is slow or noisy. Local hits are merged ahead of backend results in recall output.
+This gives fast, deterministic recall for explicitly stored preferences even when EverMemOS retrieval is slow or noisy. Local hits are merged ahead of backend results in recall output. Up to 300 entries are kept per project; oldest entries are trimmed when the limit is reached.
 
-## Requirements
+### Profile recall
 
-- Node.js 22+
-- OpenCode with plugin support
-- Running EverMemOS server
+EverMemOS extracts **profile memories** — stable facts about you as a developer (preferences, conventions, working style) — separately from episodic memories. These are fetched independently from the search endpoint and injected alongside episodic recall on every turn. Configure with `injectProfileRecall` and `profileRecallLimit`.
 
-## Install
+## Prerequisites
+
+### 1. Set up the memory backend (EverMemOS)
+
+Clone and configure EverMemOS:
 
 ```bash
+git clone https://github.com/EverMind-AI/EverMemOS
+cd EverMemOS
+cp env.template .env
+```
+
+Edit `.env` and fill in your API keys:
+
+```dotenv
+# LLM extraction
+LLM_PROVIDER=openai
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_MODEL=gpt-4.1-mini
+LLM_API_KEY=sk-REPLACE_ME
+
+# Embeddings
+VECTORIZE_PROVIDER=vllm
+VECTORIZE_BASE_URL=https://api.openai.com/v1
+VECTORIZE_MODEL=text-embedding-3-small
+VECTORIZE_API_KEY=sk-REPLACE_ME
+
+VECTORIZE_FALLBACK_PROVIDER=none
+RERANK_FALLBACK_PROVIDER=none
+```
+
+Start the memory backend with Docker:
+
+```bash
+docker compose up -d
+```
+
+> Add `restart: unless-stopped` to each service in `docker-compose.yml` so the backend starts automatically with Docker on every boot — you won't have to think about it again.
+
+Then start the EverMemOS API server:
+
+```bash
+# Linux/macOS
+uv run python src/run.py --port 1995
+
+# Windows (PowerShell)
+$env:PYTHONIOENCODING="utf-8"
+py -m uv run python src/run.py --port 1995
+```
+
+**OpenAI compatibility note:** If using `LLM_BASE_URL=https://api.openai.com/v1`, ensure the `"provider"` field in `src/memory_layer/llm/openai_provider.py` is only sent for OpenRouter URLs. The OpenAI API rejects unknown fields with HTTP 400.
+
+### 2. Install the plugin
+
+```bash
+git clone https://github.com/LordAizen1/opencode-evermemos-plugin
+cd opencode-evermemos-plugin
 npm install
 npm run build
 ```
+
+### 3. Register with OpenCode
+
+Add to your OpenCode config (`%USERPROFILE%\.config\opencode\opencode.json` on Windows, `~/.config/opencode/opencode.json` on Linux/macOS):
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["file:///absolute/path/to/opencode-evermemos-plugin/dist/index.js"]
+}
+```
+
+Open any repository with a git `origin` remote in OpenCode and start chatting — the plugin activates automatically.
 
 ## Configuration
 
@@ -91,6 +167,7 @@ Supported env vars:
 | `EVERMEMOS_INJECT_PROFILE_RECALL` | `true` | Fetch and inject profile memories |
 | `EVERMEMOS_PROFILE_RECALL_LIMIT` | `3` | Max profile memories to inject |
 | `EVERMEMOS_SENDER_ID` | `opencode-user` | Sender ID written to EverMemOS |
+| `EVERMEMOS_LOCAL_STORE_PATH` | `~/.config/opencode/evermemos-local.json` | Override path for local memory store |
 
 Windows PowerShell example:
 
@@ -99,55 +176,6 @@ $env:EVERMEMOS_BASE_URL = "http://localhost:1995"
 $env:EVERMEMOS_RETRIEVE_METHOD = "keyword"
 $env:EVERMEMOS_RECALL_TOP_K = "5"
 ```
-
-## Load in OpenCode
-
-Build the plugin:
-
-```bash
-npm run build
-```
-
-Register in OpenCode config (`%USERPROFILE%\.config\opencode\opencode.json`):
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugin": ["file:///C:/Users/<your-user>/Desktop/my_projects/opencode-evermemos-plugin/dist/index.js"]
-}
-```
-
-Open any repository with a git `origin` remote and start chatting — the plugin activates automatically.
-
-## EverMemOS setup
-
-Start EverMemOS locally (Windows):
-
-```powershell
-$env:PYTHONIOENCODING="utf-8"
-py -m uv run python src/run.py --port 1995
-```
-
-Known-good `.env` block (OpenAI-only path):
-
-```dotenv
-# LLM extraction
-LLM_PROVIDER=openai
-LLM_BASE_URL=https://api.openai.com/v1
-LLM_MODEL=gpt-4.1-mini
-LLM_API_KEY=sk-REPLACE_ME
-
-# Embeddings
-VECTORIZE_PROVIDER=vllm
-VECTORIZE_BASE_URL=https://api.openai.com/v1
-VECTORIZE_MODEL=text-embedding-3-small
-VECTORIZE_API_KEY=sk-REPLACE_ME
-
-VECTORIZE_FALLBACK_PROVIDER=none
-RERANK_FALLBACK_PROVIDER=none
-```
-
-**OpenAI compatibility note:** If using `LLM_BASE_URL=https://api.openai.com/v1`, ensure the `"provider"` field in `openai_provider.py` is only sent for OpenRouter URLs. The OpenAI API rejects unknown fields with HTTP 400.
 
 ## Validated behavior
 

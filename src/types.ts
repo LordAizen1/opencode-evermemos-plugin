@@ -98,6 +98,12 @@ export interface DeleteMemoriesPayload {
   group_id?: string
 }
 
+export interface DeleteMemoriesResult {
+  ok: boolean
+  notFound?: boolean
+  message?: string
+}
+
 // ---------------------------------------------------------------------------
 // Session cache
 // ---------------------------------------------------------------------------

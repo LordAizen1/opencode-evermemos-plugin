@@ -2,12 +2,14 @@ import { tool, type Plugin } from "@opencode-ai/plugin"
 import { EverMemOSClient } from "./client.js"
 import { loadConfig } from "./config.js"
 import { computeGroupId } from "./git.js"
+import { recallLocalExact, recallLocalSemantic, rememberLocal } from "./local-memory.js"
 import {
   formatCompactionMemories,
   formatProfileMemories,
   formatRecalledMemories,
   mergeRecallBlocks,
   buildToolSummary,
+  shapeRecallQuery,
 } from "./memory.js"
 import { sanitize } from "./sanitize.js"
 import {
@@ -48,20 +50,52 @@ const plugin: Plugin = async (input) => {
           top_k: z.number().int().positive().max(20).optional(),
         },
         execute: async (args) => {
-          const query = sanitize(args.query, { maxLength: 1024 })
+          const query = shapeRecallQuery(
+            sanitize(args.query, { maxLength: 1024 }),
+          )
           if (!query) return "No query provided after sanitization."
+          const topK = args.top_k ?? config.recallTopK
+          const localExact = recallLocalExact(groupId, query, topK)
+          const localSemantic = localExact.length > 0
+            ? []
+            : recallLocalSemantic(groupId, query, topK)
 
-          const response = await client.search({
+          const [response, profileMemories] = await Promise.all([
+            client.search({
+              query,
+              group_id: groupId,
+              retrieve_method: config.retrieveMethod,
+              top_k: topK,
+            }),
+            config.injectProfileRecall
+              ? client.listProfileMemories(groupId, config.profileRecallLimit)
+              : Promise.resolve([]),
+          ])
+
+          if (!response && localExact.length === 0) return "EverMemOS unavailable or timed out."
+          if (
+            (!response || response.result.total_count === 0)
+            && profileMemories.length === 0
+            && localExact.length === 0
+            && localSemantic.length === 0
+          ) {
+            return "No matching memories found."
+          }
+
+          const effective = response ?? {
+            status: "ok",
+            message: "local-only",
+            result: {
+              memories: [],
+              total_count: 0,
+              has_more: false,
+            },
+          }
+          const block = formatRecalledMemories(
+            effective,
             query,
-            group_id: groupId,
-            retrieve_method: config.retrieveMethod,
-            top_k: args.top_k ?? config.recallTopK,
-          })
-
-          if (!response) return "EverMemOS unavailable or timed out."
-          if (response.result.total_count === 0) return "No matching memories found."
-
-          const block = formatRecalledMemories(response)
+            [...localExact, ...localSemantic, ...profileMemories],
+          )
           if (!block) return "No matching memories found."
 
           return block.length > 4000 ? `${block.slice(0, 4000)}\n...[truncated]` : block
@@ -78,6 +112,8 @@ const plugin: Plugin = async (input) => {
         execute: async (args) => {
           const content = sanitize(args.content, { maxLength: config.toolOutputMaxChars })
           if (!content) return "Nothing to store after sanitization."
+          const role = args.role ?? "user"
+          rememberLocal(groupId, content, role)
 
           const result = await client.memorize({
             message_id: `manual-${Date.now()}`,
@@ -85,7 +121,7 @@ const plugin: Plugin = async (input) => {
             sender: config.senderId,
             content,
             group_id: groupId,
-            role: args.role ?? "user",
+            role,
           })
 
           if (!result) return "Failed to store memory (EverMemOS unavailable or timed out)."
@@ -114,6 +150,8 @@ const plugin: Plugin = async (input) => {
 
           const result = await client.deleteMemories(payload)
           if (!result) return "Failed to delete memories (EverMemOS unavailable or timed out)."
+          if (result.ok && result.notFound) return "No memories matched the delete criteria (already clean)."
+          if (!result.ok) return "Failed to delete memories."
           return "Delete request sent successfully."
         },
       }),
@@ -128,7 +166,7 @@ const plugin: Plugin = async (input) => {
 
       const sessionId = _hookInput.sessionID
       const sanitized = sanitize(text)
-      cacheUserMessage(sessionId, sanitized)
+      cacheUserMessage(sessionId, shapeRecallQuery(sanitized) || sanitized)
 
       // Fire-and-forget: store user message in EverMemOS
       client
@@ -152,7 +190,7 @@ const plugin: Plugin = async (input) => {
       const sessionId = hookInput.sessionID
       if (!sessionId) return
 
-      const query = getCachedUserMessage(sessionId)
+      const query = shapeRecallQuery(getCachedUserMessage(sessionId))
       if (!query) return
 
       const [searchResponse, profileMemories] = await Promise.all([
@@ -169,7 +207,7 @@ const plugin: Plugin = async (input) => {
 
       const episodicBlock =
         searchResponse && searchResponse.result.total_count > 0
-          ? formatRecalledMemories(searchResponse)
+          ? formatRecalledMemories(searchResponse, query)
           : ""
       const profileBlock = config.injectProfileRecall
         ? formatProfileMemories(profileMemories, config.profileRecallLimit)
@@ -183,7 +221,7 @@ const plugin: Plugin = async (input) => {
     // experimental.session.compacting - add concise recall context
     // ------------------------------------------------------------------
     "experimental.session.compacting": async (hookInput, output) => {
-      const query = getCachedUserMessage(hookInput.sessionID)
+      const query = shapeRecallQuery(getCachedUserMessage(hookInput.sessionID))
       if (!query) return
 
       const response = await client.search({
@@ -195,7 +233,7 @@ const plugin: Plugin = async (input) => {
 
       if (!response || response.result.total_count === 0) return
 
-      const compactBlock = formatCompactionMemories(response, 4, 1200)
+      const compactBlock = formatCompactionMemories(response, 4, 1200, query)
       if (compactBlock) {
         output.context.push(compactBlock)
       }

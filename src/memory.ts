@@ -192,8 +192,8 @@ function scoreMemory(
 
   const lower = body.toLowerCase()
   if (containsPreferenceCue(lower)) score += 3
-  if (!allowMeta && isMetaToolMemory(lower)) score -= 8
-  if (!allowMeta && isLikelyRecallMetaNarrative(lower)) score -= 8
+  // Note: meta memories are already excluded via `continue` in scoreAndFilter
+  // before scoreMemory is called, so no need to penalise them here.
   score += completenessScore(body)
 
   if (markerMode) {
@@ -220,8 +220,14 @@ function isMetaToolMemory(text: string): boolean {
 }
 
 function isLikelyRecallMetaNarrative(text: string): boolean {
-  const hasMeta = /\b(recall|query|tool|memory management|requested|initiated)\b/i.test(text)
-  return hasMeta && !containsPreferenceCue(text)
+  if (containsPreferenceCue(text)) return false
+  // Only suppress clearly meta narratives — require specific multi-word signals
+  // to avoid false positives on common words like "tool", "recall", "query".
+  return (
+    /\bmemory management\b/i.test(text)
+    || /\brecall session\b/i.test(text)
+    || /\b(initiated|requested|started)\b.{0,50}\b(recall|memory session)\b/i.test(text)
+  )
 }
 
 function toMemoryBody(memory: RecalledMemory): string {
@@ -331,8 +337,10 @@ function scoreAndFilter(
 
 function normalizePotentialClip(text: string): string {
   const trimmed = text.trim()
-  // If text ends mid-token (common backend clipping), mark it explicitly.
-  if (!/[.!?]["')\]]?$/.test(trimmed) && /[A-Za-z0-9]$/.test(trimmed) && trimmed.length > 80) {
+  // Only mark as backend-truncated if the text is long enough that a missing
+  // sentence terminator is a genuine signal (not just a short natural statement).
+  // Threshold raised from 80 → 200 to avoid false positives on short memories.
+  if (trimmed.length > 200 && !/[.!?]["')\]]?$/.test(trimmed) && /[A-Za-z0-9]$/.test(trimmed)) {
     return `${trimmed} ...[backend-truncated]`
   }
   return trimmed

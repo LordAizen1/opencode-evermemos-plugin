@@ -20,6 +20,12 @@ import {
 
 const z = tool.schema
 
+// Tools that must never be stored as memories — they'd pollute recall with meta-noise.
+const SKIP_TOOLS = new Set(["evermemos_recall", "evermemos_remember", "evermemos_forget"])
+
+// Messages that look like plugin tool invocations shouldn't be stored either.
+const PLUGIN_INVOCATION_RE = /\bevermemos_(recall|remember|forget)\b/i
+
 /**
  * OpenCode EverMemOS Plugin
  *
@@ -168,6 +174,9 @@ const plugin: Plugin = async (input) => {
       const sanitized = sanitize(text)
       cacheUserMessage(sessionId, shapeRecallQuery(sanitized) || sanitized)
 
+      // Skip storing plugin tool invocations — they create meta-noise in recall
+      if (PLUGIN_INVOCATION_RE.test(sanitized)) return
+
       // Fire-and-forget: store user message in EverMemOS
       client
         .memorize({
@@ -243,6 +252,9 @@ const plugin: Plugin = async (input) => {
     // tool.execute.after - store a summary of tool results as memory
     // ------------------------------------------------------------------
     "tool.execute.after": async (hookInput, output) => {
+      // Never store the plugin's own tool calls — primary source of meta-noise
+      if (SKIP_TOOLS.has(hookInput.tool)) return
+
       const summary = buildToolSummary(
         hookInput.tool,
         hookInput.args,

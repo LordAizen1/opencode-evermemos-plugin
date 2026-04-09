@@ -2,12 +2,14 @@ import { tool, type Plugin } from "@opencode-ai/plugin"
 import { EverMemOSClient } from "./client.js"
 import { loadConfig } from "./config.js"
 import { computeGroupId } from "./git.js"
+import { recallLocalExact, recallLocalSemantic, rememberLocal } from "./local-memory.js"
 import {
   formatCompactionMemories,
   formatProfileMemories,
   formatRecalledMemories,
   mergeRecallBlocks,
   buildToolSummary,
+  shapeRecallQuery,
 } from "./memory.js"
 import { sanitize } from "./sanitize.js"
 import {
@@ -17,6 +19,12 @@ import {
 } from "./session-cache.js"
 
 const z = tool.schema
+
+// Tools that must never be stored as memories — they'd pollute recall with meta-noise.
+const SKIP_TOOLS = new Set(["evermemos_recall", "evermemos_remember", "evermemos_forget"])
+
+// Messages that look like plugin tool invocations shouldn't be stored either.
+const PLUGIN_INVOCATION_RE = /\bevermemos_(recall|remember|forget)\b/i
 
 /**
  * OpenCode EverMemOS Plugin
@@ -48,20 +56,52 @@ const plugin: Plugin = async (input) => {
           top_k: z.number().int().positive().max(20).optional(),
         },
         execute: async (args) => {
-          const query = sanitize(args.query, { maxLength: 1024 })
+          const query = shapeRecallQuery(
+            sanitize(args.query, { maxLength: 1024 }),
+          )
           if (!query) return "No query provided after sanitization."
+          const topK = args.top_k ?? config.recallTopK
+          const localExact = recallLocalExact(groupId, query, topK)
+          const localSemantic = localExact.length > 0
+            ? []
+            : recallLocalSemantic(groupId, query, topK)
 
-          const response = await client.search({
+          const [response, profileMemories] = await Promise.all([
+            client.search({
+              query,
+              group_id: groupId,
+              retrieve_method: config.retrieveMethod,
+              top_k: topK,
+            }),
+            config.injectProfileRecall
+              ? client.listProfileMemories(groupId, config.profileRecallLimit)
+              : Promise.resolve([]),
+          ])
+
+          if (!response && localExact.length === 0) return "EverMemOS unavailable or timed out."
+          if (
+            (!response || response.result.total_count === 0)
+            && profileMemories.length === 0
+            && localExact.length === 0
+            && localSemantic.length === 0
+          ) {
+            return "No matching memories found."
+          }
+
+          const effective = response ?? {
+            status: "ok",
+            message: "local-only",
+            result: {
+              memories: [],
+              total_count: 0,
+              has_more: false,
+            },
+          }
+          const block = formatRecalledMemories(
+            effective,
             query,
-            group_id: groupId,
-            retrieve_method: config.retrieveMethod,
-            top_k: args.top_k ?? config.recallTopK,
-          })
-
-          if (!response) return "EverMemOS unavailable or timed out."
-          if (response.result.total_count === 0) return "No matching memories found."
-
-          const block = formatRecalledMemories(response)
+            [...localExact, ...localSemantic, ...profileMemories],
+          )
           if (!block) return "No matching memories found."
 
           return block.length > 4000 ? `${block.slice(0, 4000)}\n...[truncated]` : block
@@ -78,6 +118,8 @@ const plugin: Plugin = async (input) => {
         execute: async (args) => {
           const content = sanitize(args.content, { maxLength: config.toolOutputMaxChars })
           if (!content) return "Nothing to store after sanitization."
+          const role = args.role ?? "user"
+          rememberLocal(groupId, content, role)
 
           const result = await client.memorize({
             message_id: `manual-${Date.now()}`,
@@ -85,7 +127,7 @@ const plugin: Plugin = async (input) => {
             sender: config.senderId,
             content,
             group_id: groupId,
-            role: args.role ?? "user",
+            role,
           })
 
           if (!result) return "Failed to store memory (EverMemOS unavailable or timed out)."
@@ -114,6 +156,8 @@ const plugin: Plugin = async (input) => {
 
           const result = await client.deleteMemories(payload)
           if (!result) return "Failed to delete memories (EverMemOS unavailable or timed out)."
+          if (result.ok && result.notFound) return "No memories matched the delete criteria (already clean)."
+          if (!result.ok) return "Failed to delete memories."
           return "Delete request sent successfully."
         },
       }),
@@ -128,7 +172,10 @@ const plugin: Plugin = async (input) => {
 
       const sessionId = _hookInput.sessionID
       const sanitized = sanitize(text)
-      cacheUserMessage(sessionId, sanitized)
+      cacheUserMessage(sessionId, shapeRecallQuery(sanitized) || sanitized)
+
+      // Skip storing plugin tool invocations — they create meta-noise in recall
+      if (PLUGIN_INVOCATION_RE.test(sanitized)) return
 
       // Fire-and-forget: store user message in EverMemOS
       client
@@ -152,8 +199,19 @@ const plugin: Plugin = async (input) => {
       const sessionId = hookInput.sessionID
       if (!sessionId) return
 
-      const query = getCachedUserMessage(sessionId)
-      if (!query) return
+      // Use cached query from current message if available; fall back to a
+      // broad default so recall still fires on the very first message of a
+      // fresh session (cache is empty until chat.message populates it).
+      const query =
+        shapeRecallQuery(getCachedUserMessage(sessionId)) ??
+        "project context preferences stack technology"
+
+      const localExact = recallLocalExact(groupId, query, config.recallTopK)
+      const localSemantic =
+        localExact.length > 0
+          ? []
+          : recallLocalSemantic(groupId, query, config.recallTopK)
+      const localHits = [...localExact, ...localSemantic]
 
       const [searchResponse, profileMemories] = await Promise.all([
         client.search({
@@ -169,8 +227,14 @@ const plugin: Plugin = async (input) => {
 
       const episodicBlock =
         searchResponse && searchResponse.result.total_count > 0
-          ? formatRecalledMemories(searchResponse)
-          : ""
+          ? formatRecalledMemories(searchResponse, query, localHits)
+          : localHits.length > 0
+            ? formatRecalledMemories(
+                { status: "ok", message: "local-only", result: { memories: [], total_count: 0, has_more: false } },
+                query,
+                localHits,
+              )
+            : ""
       const profileBlock = config.injectProfileRecall
         ? formatProfileMemories(profileMemories, config.profileRecallLimit)
         : ""
@@ -183,7 +247,7 @@ const plugin: Plugin = async (input) => {
     // experimental.session.compacting - add concise recall context
     // ------------------------------------------------------------------
     "experimental.session.compacting": async (hookInput, output) => {
-      const query = getCachedUserMessage(hookInput.sessionID)
+      const query = shapeRecallQuery(getCachedUserMessage(hookInput.sessionID))
       if (!query) return
 
       const response = await client.search({
@@ -195,7 +259,7 @@ const plugin: Plugin = async (input) => {
 
       if (!response || response.result.total_count === 0) return
 
-      const compactBlock = formatCompactionMemories(response, 4, 1200)
+      const compactBlock = formatCompactionMemories(response, 4, 1200, query)
       if (compactBlock) {
         output.context.push(compactBlock)
       }
@@ -205,6 +269,9 @@ const plugin: Plugin = async (input) => {
     // tool.execute.after - store a summary of tool results as memory
     // ------------------------------------------------------------------
     "tool.execute.after": async (hookInput, output) => {
+      // Never store the plugin's own tool calls — primary source of meta-noise
+      if (SKIP_TOOLS.has(hookInput.tool)) return
+
       const summary = buildToolSummary(
         hookInput.tool,
         hookInput.args,

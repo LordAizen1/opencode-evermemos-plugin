@@ -6,6 +6,7 @@ import type {
   SearchMemoriesPayload,
   SearchMemoriesResponse,
   DeleteMemoriesPayload,
+  DeleteMemoriesResult,
 } from "./types.js"
 
 /**
@@ -76,16 +77,28 @@ export class EverMemOSClient {
   }
 
   /** Soft-delete memories matching the given filters. */
-  async deleteMemories(payload: DeleteMemoriesPayload): Promise<unknown | null> {
-    return this.request<unknown>(
-      "/api/v1/memories",
-      {
+  async deleteMemories(payload: DeleteMemoriesPayload): Promise<DeleteMemoriesResult | null> {
+    try {
+      const res = await fetch(`${this.baseUrl}/api/v1/memories`, {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
         signal: AbortSignal.timeout(this.writeTimeoutMs),
-      },
-    )
+      })
+
+      if (res.ok) {
+        return { ok: true, message: "Delete request sent successfully." }
+      }
+
+      if (res.status === 404) {
+        return { ok: true, notFound: true, message: "No memories matched the delete criteria." }
+      }
+
+      return { ok: false }
+    } catch {
+      // Timeout/network failure â€” fail open
+      return null
+    }
   }
 
   // -----------------------------------------------------------------------

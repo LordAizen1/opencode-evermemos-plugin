@@ -1,10 +1,30 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
   "name": "opencode-evermemos-plugin",
-  "version": "0.1.0",
-  "description": "Durable project memory for OpenCode via EverMemOS",
+  "version": "0.1.1",
+  "description": "Durable project memory for OpenCode via EverMemOS — passive cross-session recall with structured episodic, profile, and foresight memory types",
   "type": "module",
   "license": "MIT",
+  "main": "./dist/index.js",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "evermemos",
+    "memory",
+    "ai-memory",
+    "persistent-memory",
+    "coding-assistant",
+    "context"
+  ],
+  "author": "LordAizen1",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LordAizen1/opencode-evermemos-plugin.git"
+  },
+  "homepage": "https://github.com/LordAizen1/opencode-evermemos-plugin#readme",
+  "bugs": {
+    "url": "https://github.com/LordAizen1/opencode-evermemos-plugin/issues"
+  },
   "exports": {
     ".": {
       "import": "./dist/index.js",
@@ -17,7 +37,8 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "tsc"
+    "build": "tsc",
+    "prepublishOnly": "tsc"
   },
   "peerDependencies": {
     "@opencode-ai/plugin": ">=1.3.0"

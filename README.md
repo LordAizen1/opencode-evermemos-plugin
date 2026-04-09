@@ -196,6 +196,16 @@ $env:EVERMEMOS_RECALL_TOP_K = "5"
 
 ## Validated behavior
 
+### First-message recall (confirmed)
+
+Passive recall fires on the **very first message** of a fresh session. In a two-session test, three questions were asked cold with no prior context in the new session:
+
+- *"What TypeScript conventions should you follow in this project?"* → answered correctly from memory (const, no any, strict mode)
+- *"Is there any known bug I should be aware of?"* → recalled the auth flow bug from a prior session
+- *"Where's the database schema and are there any tables I should be careful with?"* → recalled the schema path and the users table restriction
+
+All three answered without any file browsing or explicit tool calls. See [`docs/VALIDATION.md`](docs/VALIDATION.md) for full test results.
+
 ### Cross-session passive recall (confirmed)
 
 In a fresh session with no prior context, asking *"what's my coding preference for this project?"* returned the correct answer from memories stored in a previous session — without any explicit tool call. The model answered naturally from injected system prompt context.
@@ -219,7 +229,7 @@ Plugin tool calls (`evermemos_recall`, `evermemos_remember`, `evermemos_forget`)
 ## Manual E2E test plan
 
 1. Start EverMemOS locally.
-2. Build the plugin (`npm run build`) and register it in OpenCode config.
+2. Install the plugin (`npm install -g opencode-evermemos-plugin`) and register it in OpenCode config.
 3. Open a repo with a git `origin` remote in OpenCode.
 4. Send a message with project-specific context (e.g. stack preferences).
 5. Close the session. Open a new session in the same repo.

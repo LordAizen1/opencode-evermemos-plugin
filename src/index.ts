@@ -199,8 +199,19 @@ const plugin: Plugin = async (input) => {
       const sessionId = hookInput.sessionID
       if (!sessionId) return
 
-      const query = shapeRecallQuery(getCachedUserMessage(sessionId))
-      if (!query) return
+      // Use cached query from current message if available; fall back to a
+      // broad default so recall still fires on the very first message of a
+      // fresh session (cache is empty until chat.message populates it).
+      const query =
+        shapeRecallQuery(getCachedUserMessage(sessionId)) ??
+        "project context preferences stack technology"
+
+      const localExact = recallLocalExact(groupId, query, config.recallTopK)
+      const localSemantic =
+        localExact.length > 0
+          ? []
+          : recallLocalSemantic(groupId, query, config.recallTopK)
+      const localHits = [...localExact, ...localSemantic]
 
       const [searchResponse, profileMemories] = await Promise.all([
         client.search({
@@ -216,8 +227,14 @@ const plugin: Plugin = async (input) => {
 
       const episodicBlock =
         searchResponse && searchResponse.result.total_count > 0
-          ? formatRecalledMemories(searchResponse, query)
-          : ""
+          ? formatRecalledMemories(searchResponse, query, localHits)
+          : localHits.length > 0
+            ? formatRecalledMemories(
+                { status: "ok", message: "local-only", result: { memories: [], total_count: 0, has_more: false } },
+                query,
+                localHits,
+              )
+            : ""
       const profileBlock = config.injectProfileRecall
         ? formatProfileMemories(profileMemories, config.profileRecallLimit)
         : ""

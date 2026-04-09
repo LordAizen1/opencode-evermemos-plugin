@@ -106,20 +106,37 @@ py -m uv run python src/run.py --port 1995
 ### 2. Install the plugin
 
 ```bash
-git clone https://github.com/LordAizen1/opencode-evermemos-plugin
-cd opencode-evermemos-plugin
-npm install
-npm run build
+npm install -g opencode-evermemos-plugin
 ```
 
 ### 3. Register with OpenCode
+
+Find the global install path:
+
+```bash
+# Linux/macOS
+npm root -g
+# → e.g. /usr/local/lib/node_modules
+
+# Windows (PowerShell)
+npm root -g
+# → e.g. C:\Users\you\AppData\Roaming\npm\node_modules
+```
 
 Add to your OpenCode config (`%USERPROFILE%\.config\opencode\opencode.json` on Windows, `~/.config/opencode/opencode.json` on Linux/macOS):
 
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["file:///absolute/path/to/opencode-evermemos-plugin/dist/index.js"]
+  "plugin": ["file:///path/from-npm-root-g/opencode-evermemos-plugin/dist/index.js"]
+}
+```
+
+**Example (Windows):**
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["file:///C:/Users/you/AppData/Roaming/npm/node_modules/opencode-evermemos-plugin/dist/index.js"]
 }
 ```
 

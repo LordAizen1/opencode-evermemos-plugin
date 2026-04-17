@@ -147,23 +147,24 @@ const plugin: Plugin = async (input) => {
   try {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 2500)
-    
+
     const [memHealth, infHealth] = await Promise.all([
-      fetch(`${config.baseUrl}/v1/health`, { signal: controller.signal }).catch(() => null),
+      fetch(`${config.baseUrl}/health`, { signal: controller.signal }).catch(() => null),
       fetch(`${opencodeUrl}/internal/inference/health`, { headers: hdrs, signal: controller.signal }).catch(() => null)
     ])
     clearTimeout(timeout)
-    
-    if (memHealth?.ok && infHealth?.ok) {
+
+    if (memHealth?.ok) {
       isHealthy = true
+      if (!infHealth?.ok) {
+        console.warn(`[EverMemOS Plugin] [WARN] OpenCode internal inference API unavailable — auto-setup and LLM-side features disabled, memory hooks active.`)
+      }
     } else {
-      if (!memHealth?.ok) console.warn(`[EverMemOS Plugin] ❌ EverMemOS backend at ${config.baseUrl} is unreachable or unhealthy.`)
-      if (!infHealth?.ok) console.warn(`[EverMemOS Plugin] ❌ OpenCode internal inference API is unreachable or unhealthy.`)
-      console.warn("[EverMemOS Plugin] Memory features are disabled for this session.")
-      console.warn("  Hint: Run \`bun run evermemos doctor\` for more info.")
+      console.warn(`[EverMemOS Plugin] [FAIL] EverMemOS backend at ${config.baseUrl} is unreachable or unhealthy. Memory features are disabled for this session.`)
+      console.warn("  Hint: Run `bun run evermemos doctor` for more info.")
     }
   } catch (e) {
-    console.warn("[EverMemOS Plugin] ❌ Startup diagnostics failed. Memory features disabled.", e)
+    console.warn("[EverMemOS Plugin] [FAIL] Startup diagnostics failed. Memory features disabled.", e)
   }
 
   const evermemos_backend_status = tool({
@@ -177,7 +178,7 @@ const plugin: Plugin = async (input) => {
       }
       
       try {
-        const memRes = await fetch(`${config.baseUrl}/v1/health`)
+        const memRes = await fetch(`${config.baseUrl}/health`)
         results.evermemos_backend = memRes.ok ? "healthy" : `error: ${memRes.status}`
       } catch (e: any) {
         results.evermemos_backend = `unreachable: ${e.message}`

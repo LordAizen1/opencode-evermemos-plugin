@@ -71,6 +71,9 @@ export function classifyWrite(
     }
   }
 
+  // Precedence is intentional: project cues checked before global.
+  // A message matching both (e.g. "I prefer TypeScript in this stack")
+  // routes to project scope because projectProfile is checked first.
   if (projectForesight) {
     return {
       scope: "project",

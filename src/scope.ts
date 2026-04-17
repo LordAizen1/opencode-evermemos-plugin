@@ -5,6 +5,7 @@ export function createScopeContext(userId: string, projectGroupId: string): Scop
   return {
     userId,
     projectGroupId,
+    // v1 is a version token — increment it to invalidate all existing global group IDs (breaking schema change only)
     globalGroupId: `oc_global_v1_${shortHash(userId)}`,
   }
 }

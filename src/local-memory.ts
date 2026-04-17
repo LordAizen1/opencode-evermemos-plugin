@@ -200,6 +200,7 @@ function loadStore(): LocalMemoryStore {
       for (const [groupId, entries] of Object.entries(parsed.groups)) {
         migratedSpaces[`project:${groupId}`] = Array.isArray(entries) ? entries : []
       }
+      console.debug("[evermemos] Migrated local store v1 -> v2")
       return { version: 2, spaces: migratedSpaces }
     }
 

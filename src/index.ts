@@ -30,6 +30,14 @@ import type { MemoryScope } from "./types.js"
 
 const z = tool.schema
 
+// Write to log file instead of stderr to avoid corrupting OpenCode's TUI.
+const LOG_FILE = join(dirname(fileURLToPath(import.meta.url)), "..", "plugin-debug.log")
+function pluginLog(msg: string): void {
+  try {
+    appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${msg}\n`)
+  } catch { /* fail silent */ }
+}
+
 // Tools that must never be stored as memories — they'd pollute recall with meta-noise.
 const SKIP_TOOLS = new Set(["evermemos_recall", "evermemos_remember", "evermemos_forget", "evermemos_backend_status"])
 
@@ -77,40 +85,32 @@ const plugin: Plugin = async (input) => {
     const memDir = resolve(__dirname, "../../EverMemOS-main")
     const envDest = join(memDir, ".env")
     
-    const logFile = resolve(__dirname, "..", "plugin-debug.log")
-    const debugLog = (msg: string) => {
-      const line = `[${new Date().toISOString()}] ${msg}\n`
-      try {
-        appendFileSync(logFile, line)
-      } catch(e) {}
-    }
-
-    debugLog(`[EverMemOS Plugin DEBUG] Auto-setup initiated.`)
-    debugLog(`[EverMemOS Plugin DEBUG] PORT=${opencodePort}, hasPassword=${!!opencodePassword}`)
-    debugLog(`[EverMemOS Plugin DEBUG] memDir resolved to: ${memDir}`)
-    debugLog(`[EverMemOS Plugin DEBUG] envDest resolved to: ${envDest}`)
-    debugLog(`[EverMemOS Plugin DEBUG] existsSync(memDir): ${existsSync(memDir)}`)
-    debugLog(`[EverMemOS Plugin DEBUG] existsSync(envDest): ${existsSync(envDest)}`)
+    pluginLog(`[DEBUG] Auto-setup initiated.`)
+    pluginLog(`[EverMemOS Plugin DEBUG] PORT=${opencodePort}, hasPassword=${!!opencodePassword}`)
+    pluginLog(`[EverMemOS Plugin DEBUG] memDir resolved to: ${memDir}`)
+    pluginLog(`[EverMemOS Plugin DEBUG] envDest resolved to: ${envDest}`)
+    pluginLog(`[EverMemOS Plugin DEBUG] existsSync(memDir): ${existsSync(memDir)}`)
+    pluginLog(`[EverMemOS Plugin DEBUG] existsSync(envDest): ${existsSync(envDest)}`)
 
     if (existsSync(memDir) && !existsSync(envDest)) {
-      debugLog("[EverMemOS Plugin] Auto-configuring EverMemOS .env via OpenCode Provider...")
+      pluginLog("[EverMemOS Plugin] Auto-configuring EverMemOS .env via OpenCode Provider...")
       let template = ""
       const templatePath = join(memDir, "env.template")
       if (existsSync(templatePath)) {
         template = readFileSync(templatePath, "utf8")
-        debugLog(`[EverMemOS Plugin DEBUG] Read env.template successfully.`)
+        pluginLog(`[EverMemOS Plugin DEBUG] Read env.template successfully.`)
       } else {
-        debugLog(`[EverMemOS Plugin DEBUG] Warning: env.template NOT FOUND at ${templatePath}`)
+        pluginLog(`[EverMemOS Plugin DEBUG] Warning: env.template NOT FOUND at ${templatePath}`)
       }
       
-      debugLog(`[EverMemOS Plugin DEBUG] Fetching models from ${opencodeUrl}/internal/inference/models`)
+      pluginLog(`[EverMemOS Plugin DEBUG] Fetching models from ${opencodeUrl}/internal/inference/models`)
       const modRes = await fetch(`${opencodeUrl}/internal/inference/models`, { headers: hdrs }).catch((err) => {
-        debugLog(`[EverMemOS Plugin DEBUG] Fetch error: ${err.message}`)
+        pluginLog(`[EverMemOS Plugin DEBUG] Fetch error: ${err.message}`)
         return null
       })
       
       if (modRes && modRes.ok) {
-        debugLog(`[EverMemOS Plugin DEBUG] Model API hit successfully.`)
+        pluginLog(`[EverMemOS Plugin DEBUG] Model API hit successfully.`)
         const data = await modRes.json() as any
         const providerStr = data.providers?.length > 0 ? "opencode" : "openai"
         const defaultModelStr = data.defaultModel || "gpt-4o"
@@ -129,18 +129,15 @@ const plugin: Plugin = async (input) => {
           .replace(/^VECTORIZE_API_KEY=.*/m, `VECTORIZE_API_KEY=YOUR_GEMINI_API_KEY`)
 
         writeFileSync(envDest, envContent)
-        debugLog("[EverMemOS Plugin] ✅ Auto-configured .env!")
+        pluginLog("[EverMemOS Plugin] ✅ Auto-configured .env!")
       } else {
-        debugLog(`[EverMemOS Plugin DEBUG] Failed to fetch models. Status: ${modRes?.status}`)
+        pluginLog(`[EverMemOS Plugin DEBUG] Failed to fetch models. Status: ${modRes?.status}`)
       }
     } else {
-       debugLog(`[EverMemOS Plugin DEBUG] Skipping creation. Either memDir does not exist, or .env already exists.`)
+       pluginLog(`[EverMemOS Plugin DEBUG] Skipping creation. Either memDir does not exist, or .env already exists.`)
     }
   } catch(e: any) {
-    console.warn("[EverMemOS Plugin] Auto-setup failed", e.message)
-    try {
-      appendFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "..", "plugin-debug.log"), `ERROR: ${e.message}\n`)
-    } catch(e2) {}
+    pluginLog(`ERROR: Auto-setup failed: ${e.message}`)
   }
 
   let isHealthy = false
@@ -157,14 +154,13 @@ const plugin: Plugin = async (input) => {
     if (memHealth?.ok) {
       isHealthy = true
       if (!infHealth?.ok) {
-        console.warn(`[EverMemOS Plugin] [WARN] OpenCode internal inference API unavailable — auto-setup and LLM-side features disabled, memory hooks active.`)
+        pluginLog(`[WARN] OpenCode internal inference API unavailable — auto-setup disabled, memory hooks active.`)
       }
     } else {
-      console.warn(`[EverMemOS Plugin] [FAIL] EverMemOS backend at ${config.baseUrl} is unreachable or unhealthy. Memory features are disabled for this session.`)
-      console.warn("  Hint: Run `bun run evermemos doctor` for more info.")
+      pluginLog(`[FAIL] EverMemOS backend at ${config.baseUrl} is unreachable. Memory features disabled for this session.`)
     }
-  } catch (e) {
-    console.warn("[EverMemOS Plugin] [FAIL] Startup diagnostics failed. Memory features disabled.", e)
+  } catch (e: any) {
+    pluginLog(`[FAIL] Startup diagnostics failed: ${e.message}`)
   }
 
   const evermemos_backend_status = tool({

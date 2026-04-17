@@ -5,12 +5,16 @@
 export interface PluginConfig {
   /** EverMemOS server base URL (e.g. "http://localhost:8000") */
   baseUrl: string
+  /** Stable user ID used for reads/writes. Replaces senderId as the canonical identity. */
+  userId: string
   /** Timeout in ms for recall (search) requests. Default: 300 */
   recallTimeoutMs: number
   /** Timeout in ms for write (memorize) requests. Default: 500 */
   writeTimeoutMs: number
   /** Max characters kept per tool output summary before truncation */
   toolOutputMaxChars: number
+  /** Hard cap for injected memory context blocks */
+  maxInjectedChars: number
   /** Retrieval method passed to EverMemOS search. Default: "hybrid" */
   retrieveMethod: RetrieveMethod
   /** Number of memories to recall per query. Default: 5 */
@@ -19,8 +23,32 @@ export interface PluginConfig {
   injectProfileRecall: boolean
   /** Maximum number of profile memories to inject. Default: 3 */
   profileRecallLimit: number
-  /** Stable sender ID written into EverMemOS messages */
+  /** Maximum number of global profile memories to inject. Default: 4 */
+  globalProfileRecallLimit: number
+  /** Whether global profile recall is enabled. Default: true */
+  enableGlobalScope: boolean
+  /** Whether repeated project preferences may be promoted to global profile memory */
+  enablePreferencePromotion: boolean
+  /** Number of distinct project scopes that must repeat a preference before promotion */
+  promotionMinProjects: number
+  /** Deprecated alias kept for backwards compatibility in config files */
   senderId: string
+}
+
+export type MemoryScope = "project" | "global"
+export type MemoryKind = "profile" | "episodic_memory" | "foresight"
+
+export interface RoutedWrite {
+  scope: MemoryScope
+  memoryType: MemoryKind
+  confidence: number
+  reason: string
+}
+
+export interface ScopeContext {
+  userId: string
+  projectGroupId: string
+  globalGroupId: string
 }
 
 export type RetrieveMethod =
@@ -49,11 +77,20 @@ export interface MemorizeMessagePayload {
 /** GET /api/v1/memories/search query payload */
 export interface SearchMemoriesPayload {
   query: string
-  group_id: string
+  user_id?: string
+  group_id?: string
   retrieve_method: RetrieveMethod
   top_k: number
   memory_types?: string[]
   include_metadata?: boolean
+}
+
+export interface ListMemoriesPayload {
+  user_id?: string
+  group_id?: string
+  memory_type: string
+  limit: number
+  offset?: number
 }
 
 /** Shape of a single memory returned by search (subset we care about) */

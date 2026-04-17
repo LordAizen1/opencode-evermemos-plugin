@@ -2,3 +2,5 @@ node_modules/
 dist/
 *.tsbuildinfo
 .env
+plugin-debug.log
+bun.lock

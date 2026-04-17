@@ -5,6 +5,7 @@ import type {
   MemorizeResponse,
   SearchMemoriesPayload,
   SearchMemoriesResponse,
+  ListMemoriesPayload,
   DeleteMemoriesPayload,
   DeleteMemoriesResult,
 } from "./types.js"
@@ -29,10 +30,11 @@ export class EverMemOSClient {
   async search(payload: SearchMemoriesPayload): Promise<SearchMemoriesResponse | null> {
     const params = new URLSearchParams({
       query: payload.query,
-      group_id: payload.group_id,
       retrieve_method: payload.retrieve_method,
       top_k: String(payload.top_k),
     })
+    if (payload.user_id) params.set("user_id", payload.user_id)
+    if (payload.group_id) params.set("group_id", payload.group_id)
     if (payload.include_metadata !== undefined) {
       params.set("include_metadata", String(payload.include_metadata))
     }
@@ -50,21 +52,33 @@ export class EverMemOSClient {
   }
 
   /** Fetch profile memories separately from search endpoint. */
-  async listProfileMemories(groupId: string, limit: number): Promise<RecalledMemory[]> {
+  async listMemories(payload: ListMemoriesPayload): Promise<RecalledMemory[]> {
     const params = new URLSearchParams({
+      memory_type: payload.memory_type,
+      limit: String(payload.limit),
+    })
+    if (payload.user_id) params.set("user_id", payload.user_id)
+    if (payload.group_id) params.set("group_id", payload.group_id)
+    if (payload.offset !== undefined) params.set("offset", String(payload.offset))
+
+    const response = await this.request<unknown>(`/api/v1/memories?${params.toString()}`, {
+      method: "GET",
+      signal: AbortSignal.timeout(this.recallTimeoutMs),
+    })
+    return extractMemories(response)
+  }
+
+  async listProfileMemories(
+    userId: string,
+    groupId: string,
+    limit: number,
+  ): Promise<RecalledMemory[]> {
+    return this.listMemories({
+      user_id: userId,
       group_id: groupId,
       memory_type: "profile",
-      limit: String(limit),
+      limit,
     })
-
-    const response = await this.request<unknown>(
-      `/api/v1/memories?${params.toString()}`,
-      {
-        method: "GET",
-        signal: AbortSignal.timeout(this.recallTimeoutMs),
-      },
-    )
-    return extractMemories(response)
   }
 
   /** Store a single message as memory. */

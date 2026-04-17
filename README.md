@@ -175,8 +175,7 @@ Recommended JSONC config (local EverMemOS on `:1995`):
   "recallTimeoutMs": 20000,
   "writeTimeoutMs": 20000,
   "toolOutputMaxChars": 2048,
-  "maxInjectedChars": 3500,
-  "senderId": "opencode-user"
+  "maxInjectedChars": 3500
 }
 ```
 

@@ -3,3 +3,4 @@ dist/
 *.tsbuildinfo
 .env
 plugin-debug.log
+bun.lock

@@ -179,13 +179,13 @@ Recommended JSONC config (local EverMemOS on `:1995`):
 }
 ```
 
-> Built-in `baseUrl` default is `http://localhost:8000`. For local EverMemOS set `http://localhost:1995`.
+> Built-in `baseUrl` default is `http://localhost:1995`.
 
 Supported env vars:
 
 | Variable | Default | Description |
 |---|---|---|
-| `EVERMEMOS_BASE_URL` | `http://localhost:8000` | EverMemOS server URL |
+| `EVERMEMOS_BASE_URL` | `http://localhost:1995` | EverMemOS server URL |
 | `EVERMEMOS_CONFIG_PATH` | — | Override path to JSONC config |
 | `EVERMEMOS_RECALL_TIMEOUT_MS` | `300` | Timeout for recall requests (ms) |
 | `EVERMEMOS_WRITE_TIMEOUT_MS` | `500` | Timeout for write requests (ms) |
@@ -200,7 +200,6 @@ Supported env vars:
 | `EVERMEMOS_ENABLE_PREFERENCE_PROMOTION` | `true` | Promote repeated project preferences into global profile memory |
 | `EVERMEMOS_PROMOTION_MIN_PROJECTS` | `2` | Distinct project scopes required before promotion |
 | `EVERMEMOS_USER_ID` | OS username | Stable user identity for scoped reads/writes |
-| `EVERMEMOS_SENDER_ID` | `opencode-user` | Sender ID written to EverMemOS |
 | `EVERMEMOS_LOCAL_STORE_PATH` | `~/.config/opencode/evermemos-local.json` | Override path for local memory store |
 
 Windows PowerShell example:
@@ -221,11 +220,15 @@ Passive recall fires on the **very first message** of a fresh session. In a two-
 - *"Is there any known bug I should be aware of?"* → recalled the auth flow bug from a prior session
 - *"Where's the database schema and are there any tables I should be careful with?"* → recalled the schema path and the users table restriction
 
-All three answered without any file browsing or explicit tool calls. See [`docs/VALIDATION.md`](docs/VALIDATION.md) for full test results.
+All three answered without any file browsing or explicit tool calls.
 
 ### Cross-session passive recall (confirmed)
 
 In a fresh session with no prior context, asking *"what's my coding preference for this project?"* returned the correct answer from memories stored in a previous session — without any explicit tool call. The model answered naturally from injected system prompt context.
+
+### Cross-project global recall (confirmed)
+
+Preferences stored in one repository were recalled correctly in a completely different repository. In a separate project with no shared history, asking *"what are my coding preferences?"* returned preferences planted in another repo — small focused commits, TypeScript strict mode — without any explicit tool call. This is the core value of global scope: user-wide preferences follow you across projects without leaking repo-specific facts.
 
 ### Explicit tool round-trip (confirmed)
 

@@ -85,14 +85,19 @@ When using this variant, set plugin retrieval to keyword-only in `evermemos.json
 ```json
 {
   "baseUrl": "http://localhost:1995",
+  "userId": "opencode-user",
   "retrieveMethod": "keyword",
   "recallTopK": 5,
   "injectProfileRecall": true,
   "profileRecallLimit": 3,
+  "globalProfileRecallLimit": 4,
+  "enableGlobalScope": true,
+  "enablePreferencePromotion": true,
+  "promotionMinProjects": 2,
   "recallTimeoutMs": 20000,
   "writeTimeoutMs": 20000,
   "toolOutputMaxChars": 2048,
-  "senderId": "opencode-user"
+  "maxInjectedChars": 3500
 }
 ```
 
@@ -128,14 +133,19 @@ New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
 $json = @"
 {
   "baseUrl": "http://localhost:1995",
+  "userId": "opencode-user",
   "retrieveMethod": "keyword",
   "recallTopK": 5,
   "injectProfileRecall": true,
   "profileRecallLimit": 3,
+  "globalProfileRecallLimit": 4,
+  "enableGlobalScope": true,
+  "enablePreferencePromotion": true,
+  "promotionMinProjects": 2,
   "recallTimeoutMs": 20000,
   "writeTimeoutMs": 20000,
   "toolOutputMaxChars": 2048,
-  "senderId": "opencode-user"
+  "maxInjectedChars": 3500
 }
 "@
 $json | Set-Content (Join-Path $cfgDir "evermemos.jsonc")

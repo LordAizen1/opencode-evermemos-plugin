@@ -6,7 +6,7 @@ import type { PluginConfig } from "./types.js"
 type RawConfig = Partial<Record<keyof PluginConfig, unknown>>
 
 const DEFAULTS: PluginConfig = {
-  baseUrl: "http://localhost:8000",
+  baseUrl: "http://localhost:1995",
   userId: defaultUserId(),
   recallTimeoutMs: 300,
   writeTimeoutMs: 500,

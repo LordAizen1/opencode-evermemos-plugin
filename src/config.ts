@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs"
-import { homedir } from "node:os"
+import { homedir, userInfo } from "node:os"
 import { join } from "node:path"
 import type { PluginConfig } from "./types.js"
 
@@ -7,14 +7,20 @@ type RawConfig = Partial<Record<keyof PluginConfig, unknown>>
 
 const DEFAULTS: PluginConfig = {
   baseUrl: "http://localhost:8000",
+  userId: defaultUserId(),
   recallTimeoutMs: 300,
   writeTimeoutMs: 500,
   toolOutputMaxChars: 2048,
+  maxInjectedChars: 3500,
   retrieveMethod: "hybrid",
   recallTopK: 5,
   injectProfileRecall: true,
   profileRecallLimit: 3,
-  senderId: "opencode-user",
+  globalProfileRecallLimit: 4,
+  enableGlobalScope: true,
+  enablePreferencePromotion: true,
+  promotionMinProjects: 2,
+  senderId: defaultUserId(),
 }
 
 const DEFAULT_CONFIG_PATH = join(homedir(), ".config", "opencode", "evermemos.jsonc")
@@ -30,6 +36,12 @@ export function loadConfig(): PluginConfig {
 
   return {
     baseUrl: normalizeBaseUrl(asString(env.EVERMEMOS_BASE_URL) ?? asString(fileConfig.baseUrl) ?? DEFAULTS.baseUrl),
+    userId:
+      asString(env.EVERMEMOS_USER_ID)
+      ?? asString(env.EVERMEMOS_SENDER_ID)
+      ?? asString(fileConfig.userId)
+      ?? asString(fileConfig.senderId)
+      ?? DEFAULTS.userId,
     recallTimeoutMs:
       positiveInt(env.EVERMEMOS_RECALL_TIMEOUT_MS)
       ?? asPositiveInt(fileConfig.recallTimeoutMs)
@@ -42,6 +54,10 @@ export function loadConfig(): PluginConfig {
       positiveInt(env.EVERMEMOS_TOOL_OUTPUT_MAX_CHARS)
       ?? asPositiveInt(fileConfig.toolOutputMaxChars)
       ?? DEFAULTS.toolOutputMaxChars,
+    maxInjectedChars:
+      positiveInt(env.EVERMEMOS_MAX_INJECTED_CHARS)
+      ?? asPositiveInt(fileConfig.maxInjectedChars)
+      ?? DEFAULTS.maxInjectedChars,
     retrieveMethod:
       validMethod(env.EVERMEMOS_RETRIEVE_METHOD)
       ?? asRetrieveMethod(fileConfig.retrieveMethod)
@@ -58,8 +74,26 @@ export function loadConfig(): PluginConfig {
       positiveInt(env.EVERMEMOS_PROFILE_RECALL_LIMIT)
       ?? asPositiveInt(fileConfig.profileRecallLimit)
       ?? DEFAULTS.profileRecallLimit,
+    globalProfileRecallLimit:
+      positiveInt(env.EVERMEMOS_GLOBAL_PROFILE_RECALL_LIMIT)
+      ?? asPositiveInt(fileConfig.globalProfileRecallLimit)
+      ?? DEFAULTS.globalProfileRecallLimit,
+    enableGlobalScope:
+      parseBoolean(env.EVERMEMOS_ENABLE_GLOBAL_SCOPE)
+      ?? asBoolean(fileConfig.enableGlobalScope)
+      ?? DEFAULTS.enableGlobalScope,
+    enablePreferencePromotion:
+      parseBoolean(env.EVERMEMOS_ENABLE_PREFERENCE_PROMOTION)
+      ?? asBoolean(fileConfig.enablePreferencePromotion)
+      ?? DEFAULTS.enablePreferencePromotion,
+    promotionMinProjects:
+      positiveInt(env.EVERMEMOS_PROMOTION_MIN_PROJECTS)
+      ?? asPositiveInt(fileConfig.promotionMinProjects)
+      ?? DEFAULTS.promotionMinProjects,
     senderId:
-      asString(env.EVERMEMOS_SENDER_ID)
+      asString(env.EVERMEMOS_USER_ID)
+      ?? asString(env.EVERMEMOS_SENDER_ID)
+      ?? asString(fileConfig.userId)
       ?? asString(fileConfig.senderId)
       ?? DEFAULTS.senderId,
   }
@@ -188,4 +222,13 @@ const VALID_METHODS = new Set(["keyword", "vector", "hybrid", "rrf"])
 function validMethod(raw: string | undefined): PluginConfig["retrieveMethod"] | undefined {
   if (raw && VALID_METHODS.has(raw)) return raw as PluginConfig["retrieveMethod"]
   return undefined
+}
+
+function defaultUserId(): string {
+  try {
+    const info = userInfo()
+    return info.username?.trim() || "opencode-user"
+  } catch {
+    return "opencode-user"
+  }
 }

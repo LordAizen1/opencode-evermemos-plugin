@@ -1,8 +1,8 @@
 # opencode-evermemos-plugin
 
-Durable project memory for OpenCode using EverMemOS.
+Durable project and user memory for OpenCode using EverMemOS.
 
-The plugin captures sanitized user and tool context, stores it in EverMemOS, and automatically recalls relevant memories into the system prompt on every turn — no explicit commands needed. Memory is scoped per repository and persists across sessions.
+The plugin captures sanitized user and tool context, stores it in EverMemOS, and automatically recalls relevant memories into the system prompt on every turn — no explicit commands needed. Memory is split into project scope for repo-specific continuity and global scope for user-wide preferences.
 
 ## Why EverMemOS
 
@@ -29,13 +29,15 @@ This means recall isn't just "find similar text" — it's "here is what you've b
 
 The model can also call memory tools directly when the user asks for targeted recall, wants to save something explicitly, or wants to clean up memories:
 
-- `evermemos_recall(query, top_k?)` — recall relevant memories for the current project and return a compact summary
-- `evermemos_remember(content, role?)` — sanitize and store a memory entry explicitly
-- `evermemos_forget(event_id?, user_id?, current_project_only?)` — delete by event, user, or wipe the current project scope
+- `evermemos_recall(query, top_k?, scope?)` — recall from project, global, or both scopes
+- `evermemos_remember(content, role?, scope?)` — sanitize and store a memory entry explicitly in project, global, or auto-routed scope
+- `evermemos_forget(event_id?, user_id?, scope?, mine_only?)` — delete by event or scoped filters, defaulting to your own memories
 
-### Project isolation
+### Scoped memory model
 
-Memory is scoped per repository using a stable `group_id` derived from the git remote origin URL (SHA-256, first 16 chars). Renaming the local folder does not change the scope. Repos without a remote fall back to a hash of the directory name.
+Project memory is scoped per repository using a stable `group_id` derived from the git remote origin URL (SHA-256, first 16 chars). Renaming the local folder does not change the scope. Repos without a remote fall back to a hash of the directory name.
+
+Global memory uses a stable per-user `group_id` derived from `userId`, allowing the plugin to carry user preferences across repositories without leaking project history between them.
 
 ### Local memory lane
 
@@ -45,11 +47,15 @@ Explicit `evermemos_remember` writes are also persisted locally at:
 - Windows: `%USERPROFILE%\.config\opencode\evermemos-local.json`
 - Override: `EVERMEMOS_LOCAL_STORE_PATH`
 
-This gives fast, deterministic recall for explicitly stored preferences even when EverMemOS retrieval is slow or noisy. Local hits are merged ahead of backend results in recall output. Up to 300 entries are kept per project; oldest entries are trimmed when the limit is reached.
+This gives fast, deterministic recall even when EverMemOS retrieval is slow or noisy. Local hits are stored in scope-specific namespaces and merged with backend results during recall. Up to 300 entries are kept per scope; oldest entries are trimmed when the limit is reached.
 
 ### Profile recall
 
-EverMemOS extracts **profile memories** — stable facts about you as a developer (preferences, conventions, working style) — separately from episodic memories. These are fetched independently from the search endpoint and injected alongside episodic recall on every turn. Configure with `injectProfileRecall` and `profileRecallLimit`.
+EverMemOS extracts **profile memories** — stable facts about you as a developer (preferences, conventions, working style) — separately from episodic memories. The plugin fetches project profile memories and global profile memories independently from the search endpoint and injects them alongside project episodic recall on every turn. Configure with `injectProfileRecall`, `profileRecallLimit`, and `globalProfileRecallLimit`.
+
+### Preference promotion
+
+When the same project-scoped profile preference is seen across multiple distinct repositories, the plugin can conservatively promote it into global profile memory. Promotion only applies to writes classified as project `profile`, requires repeated exact matches across separate project scopes, and can be disabled if you want fully manual global memory.
 
 ## Prerequisites
 
@@ -157,13 +163,19 @@ Recommended JSONC config (local EverMemOS on `:1995`):
 ```jsonc
 {
   "baseUrl": "http://localhost:1995",
+  "userId": "opencode-user",
   "retrieveMethod": "keyword",
   "recallTopK": 5,
   "injectProfileRecall": true,
   "profileRecallLimit": 3,
+  "globalProfileRecallLimit": 4,
+  "enableGlobalScope": true,
+  "enablePreferencePromotion": true,
+  "promotionMinProjects": 2,
   "recallTimeoutMs": 20000,
   "writeTimeoutMs": 20000,
   "toolOutputMaxChars": 2048,
+  "maxInjectedChars": 3500,
   "senderId": "opencode-user"
 }
 ```
@@ -179,10 +191,16 @@ Supported env vars:
 | `EVERMEMOS_RECALL_TIMEOUT_MS` | `300` | Timeout for recall requests (ms) |
 | `EVERMEMOS_WRITE_TIMEOUT_MS` | `500` | Timeout for write requests (ms) |
 | `EVERMEMOS_TOOL_OUTPUT_MAX_CHARS` | `2048` | Max chars per stored tool summary |
+| `EVERMEMOS_MAX_INJECTED_CHARS` | `3500` | Hard cap for total injected memory context |
 | `EVERMEMOS_RETRIEVE_METHOD` | `hybrid` | `keyword\|vector\|hybrid\|rrf` |
 | `EVERMEMOS_RECALL_TOP_K` | `5` | Number of memories to recall |
 | `EVERMEMOS_INJECT_PROFILE_RECALL` | `true` | Fetch and inject profile memories |
 | `EVERMEMOS_PROFILE_RECALL_LIMIT` | `3` | Max profile memories to inject |
+| `EVERMEMOS_GLOBAL_PROFILE_RECALL_LIMIT` | `4` | Max global profile memories to inject |
+| `EVERMEMOS_ENABLE_GLOBAL_SCOPE` | `true` | Enable global user-wide memory scope |
+| `EVERMEMOS_ENABLE_PREFERENCE_PROMOTION` | `true` | Promote repeated project preferences into global profile memory |
+| `EVERMEMOS_PROMOTION_MIN_PROJECTS` | `2` | Distinct project scopes required before promotion |
+| `EVERMEMOS_USER_ID` | OS username | Stable user identity for scoped reads/writes |
 | `EVERMEMOS_SENDER_ID` | `opencode-user` | Sender ID written to EverMemOS |
 | `EVERMEMOS_LOCAL_STORE_PATH` | `~/.config/opencode/evermemos-local.json` | Override path for local memory store |
 

@@ -1,27 +1,37 @@
 import { tool, type Plugin } from "@opencode-ai/plugin"
+import { writeFileSync, existsSync, readFileSync, appendFileSync } from "node:fs"
+import { join, resolve, dirname } from "node:path"
+import { fileURLToPath } from "node:url"
 import { EverMemOSClient } from "./client.js"
+import { classifyWrite } from "./classify.js"
 import { loadConfig } from "./config.js"
 import { computeGroupId } from "./git.js"
-import { recallLocalExact, recallLocalSemantic, rememberLocal } from "./local-memory.js"
+import { rememberLocal } from "./local-memory.js"
 import {
-  formatCompactionMemories,
-  formatProfileMemories,
-  formatRecalledMemories,
+  clipBlock,
   mergeRecallBlocks,
   buildToolSummary,
   shapeRecallQuery,
 } from "./memory.js"
+import {
+  recallCompactionBlock,
+  recallGlobalBlocks,
+  recallProjectContext,
+} from "./retrieval.js"
+import { maybePromoteProjectProfile } from "./promotion.js"
+import { createScopeContext, groupIdForScope, localScopeKey } from "./scope.js"
 import { sanitize } from "./sanitize.js"
 import {
   cacheUserMessage,
   getCachedUserMessage,
   pruneExpired,
 } from "./session-cache.js"
+import type { MemoryScope } from "./types.js"
 
 const z = tool.schema
 
 // Tools that must never be stored as memories — they'd pollute recall with meta-noise.
-const SKIP_TOOLS = new Set(["evermemos_recall", "evermemos_remember", "evermemos_forget"])
+const SKIP_TOOLS = new Set(["evermemos_recall", "evermemos_remember", "evermemos_forget", "evermemos_backend_status"])
 
 // Messages that look like plugin tool invocations shouldn't be stored either.
 const PLUGIN_INVOCATION_RE = /\bevermemos_(recall|remember|forget)\b/i
@@ -41,19 +51,181 @@ const PLUGIN_INVOCATION_RE = /\bevermemos_(recall|remember|forget)\b/i
 const plugin: Plugin = async (input) => {
   const config = loadConfig()
   const client = new EverMemOSClient(config)
-  const groupId = await computeGroupId(
+  const projectGroupId = await computeGroupId(
     input.$ as any, // BunShell tagged-template callable
     input.directory,
   )
+  const scopeContext = createScopeContext(config.userId, projectGroupId)
+
+  // ------------------------------------------------------------------
+  // Pre-flight setup: Gracefully halt the plugin if systems are down
+  // ------------------------------------------------------------------
+  const opencodePort = input.serverUrl?.port || process.env.OPENCODE_PORT || 3000
+  const opencodePassword = input.serverUrl?.password || process.env.OPENCODE_SERVER_PASSWORD
+  const opencodeUrl = input.serverUrl ? `http://${input.serverUrl.hostname}:${opencodePort}` : `http://127.0.0.1:${opencodePort}`
+  
+  const hdrs: Record<string, string> = {}
+  if (opencodePassword) {
+    hdrs["Authorization"] = "Basic " + Buffer.from(`opencode:${opencodePassword}`).toString('base64')
+  }
+
+  // --- Auto-Setup / Auto-Discovery of EverMemOS .env ---
+  try {
+    const __dirname = dirname(fileURLToPath(import.meta.url))
+    // We are inside opencode-evermemos-plugin/dist or opencode-evermemos-plugin/src
+    // so ../../EverMemOS-main resolves to the right place relative to the plugin itself.
+    const memDir = resolve(__dirname, "../../EverMemOS-main")
+    const envDest = join(memDir, ".env")
+    
+    const logFile = resolve(__dirname, "..", "plugin-debug.log")
+    const debugLog = (msg: string) => {
+      const line = `[${new Date().toISOString()}] ${msg}\n`
+      try {
+        appendFileSync(logFile, line)
+      } catch(e) {}
+    }
+
+    debugLog(`[EverMemOS Plugin DEBUG] Auto-setup initiated.`)
+    debugLog(`[EverMemOS Plugin DEBUG] PORT=${opencodePort}, hasPassword=${!!opencodePassword}`)
+    debugLog(`[EverMemOS Plugin DEBUG] memDir resolved to: ${memDir}`)
+    debugLog(`[EverMemOS Plugin DEBUG] envDest resolved to: ${envDest}`)
+    debugLog(`[EverMemOS Plugin DEBUG] existsSync(memDir): ${existsSync(memDir)}`)
+    debugLog(`[EverMemOS Plugin DEBUG] existsSync(envDest): ${existsSync(envDest)}`)
+
+    if (existsSync(memDir) && !existsSync(envDest)) {
+      debugLog("[EverMemOS Plugin] Auto-configuring EverMemOS .env via OpenCode Provider...")
+      let template = ""
+      const templatePath = join(memDir, "env.template")
+      if (existsSync(templatePath)) {
+        template = readFileSync(templatePath, "utf8")
+        debugLog(`[EverMemOS Plugin DEBUG] Read env.template successfully.`)
+      } else {
+        debugLog(`[EverMemOS Plugin DEBUG] Warning: env.template NOT FOUND at ${templatePath}`)
+      }
+      
+      debugLog(`[EverMemOS Plugin DEBUG] Fetching models from ${opencodeUrl}/internal/inference/models`)
+      const modRes = await fetch(`${opencodeUrl}/internal/inference/models`, { headers: hdrs }).catch((err) => {
+        debugLog(`[EverMemOS Plugin DEBUG] Fetch error: ${err.message}`)
+        return null
+      })
+      
+      if (modRes && modRes.ok) {
+        debugLog(`[EverMemOS Plugin DEBUG] Model API hit successfully.`)
+        const data = await modRes.json() as any
+        const providerStr = data.providers?.length > 0 ? "opencode" : "openai"
+        const defaultModelStr = data.defaultModel || "gpt-4o"
+        // In OpenCode, model format is usually provider:model (e.g. openai:gpt-4o)
+        // We will just replace the exact lines in the template
+        
+        const envContent = template
+          .replace(/^LLM_PROVIDER=.*/m, `LLM_PROVIDER=${providerStr}`)
+          .replace(/^LLM_MODEL=.*/m, `LLM_MODEL=${defaultModelStr}`)
+          .replace(/^LLM_BASE_URL=.*/m, `LLM_BASE_URL=${opencodeUrl}/internal/inference`)
+          // Switch Vectorization to Google Gemini natively
+          .replace(/^VECTORIZE_PROVIDER=.*/m, `VECTORIZE_PROVIDER=openai`) // Gemini exposes an OpenAI-compatible endpoint
+          .replace(/^VECTORIZE_BASE_URL=.*/m, `VECTORIZE_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/`)
+          .replace(/^VECTORIZE_MODEL=.*/m, `VECTORIZE_MODEL=gemini-embedding-2-preview`)
+          .replace(/^LLM_API_KEY=.*/m, `LLM_API_KEY=${opencodePassword || 'EMPTY'}`)
+          .replace(/^VECTORIZE_API_KEY=.*/m, `VECTORIZE_API_KEY=YOUR_GEMINI_API_KEY`)
+
+        writeFileSync(envDest, envContent)
+        debugLog("[EverMemOS Plugin] ✅ Auto-configured .env!")
+      } else {
+        debugLog(`[EverMemOS Plugin DEBUG] Failed to fetch models. Status: ${modRes?.status}`)
+      }
+    } else {
+       debugLog(`[EverMemOS Plugin DEBUG] Skipping creation. Either memDir does not exist, or .env already exists.`)
+    }
+  } catch(e: any) {
+    console.warn("[EverMemOS Plugin] Auto-setup failed", e.message)
+    try {
+      appendFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "..", "plugin-debug.log"), `ERROR: ${e.message}\n`)
+    } catch(e2) {}
+  }
+
+  let isHealthy = false
+  try {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 2500)
+    
+    const [memHealth, infHealth] = await Promise.all([
+      fetch(`${config.baseUrl}/v1/health`, { signal: controller.signal }).catch(() => null),
+      fetch(`${opencodeUrl}/internal/inference/health`, { headers: hdrs, signal: controller.signal }).catch(() => null)
+    ])
+    clearTimeout(timeout)
+    
+    if (memHealth?.ok && infHealth?.ok) {
+      isHealthy = true
+    } else {
+      if (!memHealth?.ok) console.warn(`[EverMemOS Plugin] ❌ EverMemOS backend at ${config.baseUrl} is unreachable or unhealthy.`)
+      if (!infHealth?.ok) console.warn(`[EverMemOS Plugin] ❌ OpenCode internal inference API is unreachable or unhealthy.`)
+      console.warn("[EverMemOS Plugin] Memory features are disabled for this session.")
+      console.warn("  Hint: Run \`bun run evermemos doctor\` for more info.")
+    }
+  } catch (e) {
+    console.warn("[EverMemOS Plugin] ❌ Startup diagnostics failed. Memory features disabled.", e)
+  }
+
+  const evermemos_backend_status = tool({
+    description: "Check the status of EverMemOS and the OpenCode inference endpoints.",
+    args: {},
+    execute: async () => {
+      const results = {
+        evermemos_backend: "unknown",
+        opencode_inference: "unknown",
+        opencode_models: "unknown"
+      }
+      
+      try {
+        const memRes = await fetch(`${config.baseUrl}/v1/health`)
+        results.evermemos_backend = memRes.ok ? "healthy" : `error: ${memRes.status}`
+      } catch (e: any) {
+        results.evermemos_backend = `unreachable: ${e.message}`
+      }
+
+      try {
+        const infRes = await fetch(`${opencodeUrl}/internal/inference/health`, { headers: hdrs })
+        results.opencode_inference = infRes.ok ? "healthy" : `error: ${infRes.status}`
+      } catch (e: any) {
+        results.opencode_inference = `unreachable: ${e.message}`
+      }
+
+      try {
+        const modRes = await fetch(`${opencodeUrl}/internal/inference/models`, { headers: hdrs })
+        if (modRes.ok) {
+          const data = await modRes.json() as any
+          results.opencode_models = `Default Chat: ${data.defaultModel}, Configured Providers: ${data.providers?.length || 0}`
+        } else {
+          results.opencode_models = `error: ${modRes.status}`
+        }
+      } catch (e: any) {
+         results.opencode_models = `unreachable: ${e.message}`
+      }
+
+      return JSON.stringify(results, null, 2)
+    }
+  })
+
+  // If the checks fail, we ONLY expose the diagnostic tool. 
+  // No hooks, no recall, no remember - we halt gracefully internally.
+  if (!isHealthy) {
+    return {
+      tool: {
+        evermemos_backend_status
+      }
+    } as any
+  }
 
   return {
     tool: {
+      evermemos_backend_status,
       evermemos_recall: tool({
         description:
-          "Recall relevant project memories from EverMemOS for the current repository scope.",
+          "Recall relevant memories from EverMemOS for project, global, or both scopes.",
         args: {
           query: z.string().min(1).describe("What to recall"),
           top_k: z.number().int().positive().max(20).optional(),
+          scope: z.enum(["project", "global", "both"]).optional(),
         },
         execute: async (args) => {
           const query = shapeRecallQuery(
@@ -61,97 +233,91 @@ const plugin: Plugin = async (input) => {
           )
           if (!query) return "No query provided after sanitization."
           const topK = args.top_k ?? config.recallTopK
-          const localExact = recallLocalExact(groupId, query, topK)
-          const localSemantic = localExact.length > 0
-            ? []
-            : recallLocalSemantic(groupId, query, topK)
+          const scope = args.scope ?? "both"
+          const blocks: string[] = []
+          let projectHits = [] as Awaited<ReturnType<typeof recallProjectContext>>["allHits"]
 
-          const [response, profileMemories] = await Promise.all([
-            client.search({
-              query,
-              group_id: groupId,
-              retrieve_method: config.retrieveMethod,
-              top_k: topK,
-            }),
-            config.injectProfileRecall
-              ? client.listProfileMemories(groupId, config.profileRecallLimit)
-              : Promise.resolve([]),
-          ])
-
-          if (!response && localExact.length === 0) return "EverMemOS unavailable or timed out."
-          if (
-            (!response || response.result.total_count === 0)
-            && profileMemories.length === 0
-            && localExact.length === 0
-            && localSemantic.length === 0
-          ) {
-            return "No matching memories found."
+          if (scope === "project" || scope === "both") {
+            const projectContext = await recallProjectContext(client, config, scopeContext, query, topK)
+            projectHits = projectContext.allHits
+            blocks.push(...projectContext.blocks)
+          }
+          if (scope === "global" || scope === "both") {
+            const globalBlock = await recallGlobalBlocks(client, config, scopeContext, query, topK, projectHits)
+            if (globalBlock) blocks.push(globalBlock)
           }
 
-          const effective = response ?? {
-            status: "ok",
-            message: "local-only",
-            result: {
-              memories: [],
-              total_count: 0,
-              has_more: false,
-            },
-          }
-          const block = formatRecalledMemories(
-            effective,
-            query,
-            [...localExact, ...localSemantic, ...profileMemories],
-          )
+          const block = mergeRecallBlocks(...blocks)
           if (!block) return "No matching memories found."
-
-          return block.length > 4000 ? `${block.slice(0, 4000)}\n...[truncated]` : block
+          return clipBlock(block, config.maxInjectedChars)
         },
       }),
 
       evermemos_remember: tool({
         description:
-          "Store a durable memory entry in EverMemOS for the current repository scope.",
+          "Store a durable memory entry in EverMemOS for project or global scope.",
         args: {
           content: z.string().min(1).describe("Memory content to store"),
           role: z.enum(["user", "assistant"]).optional(),
+          scope: z.enum(["auto", "project", "global"]).optional(),
         },
         execute: async (args) => {
           const content = sanitize(args.content, { maxLength: config.toolOutputMaxChars })
           if (!content) return "Nothing to store after sanitization."
           const role = args.role ?? "user"
-          rememberLocal(groupId, content, role)
+          const routed = classifyWrite(content, {
+            requestedScope: args.scope,
+            enableGlobalScope: config.enableGlobalScope,
+            source: "manual",
+          })
+          rememberLocal(localScopeKey(scopeContext, routed.scope), content, role, routed.memoryType)
 
           const result = await client.memorize({
             message_id: `manual-${Date.now()}`,
             create_time: new Date().toISOString(),
-            sender: config.senderId,
+            sender: config.userId,
             content,
-            group_id: groupId,
+            group_id: groupIdForScope(scopeContext, routed.scope),
             role,
           })
 
           if (!result) return "Failed to store memory (EverMemOS unavailable or timed out)."
-          return "Memory stored successfully."
+          const promoted = maybePromoteProjectProfile(
+            client,
+            config,
+            scopeContext,
+            content,
+            role,
+            routed,
+          )
+          return promoted
+            ? `Memory stored in ${routed.scope} scope as ${routed.memoryType}, and promoted to global profile. ${routed.reason}`
+            : `Memory stored in ${routed.scope} scope as ${routed.memoryType}. ${routed.reason}`
         },
       }),
 
       evermemos_forget: tool({
         description:
-          "Delete memories in EverMemOS by event_id, user_id, or current project scope.",
+          "Delete memories in EverMemOS by event_id or by scoped filters.",
         args: {
           event_id: z.string().optional(),
           user_id: z.string().optional(),
+          scope: z.enum(["project", "global"]).optional(),
+          mine_only: z.boolean().optional(),
           current_project_only: z.boolean().optional(),
         },
         execute: async (args) => {
+          const resolvedScope: MemoryScope | undefined =
+            args.scope ?? (args.current_project_only ? "project" : undefined)
+          const mineOnly = args.mine_only !== false
           const payload = {
             event_id: args.event_id,
-            user_id: args.user_id,
-            group_id: args.current_project_only ? groupId : undefined,
+            user_id: args.user_id ?? (mineOnly ? scopeContext.userId : undefined),
+            group_id: resolvedScope ? groupIdForScope(scopeContext, resolvedScope) : undefined,
           }
 
           if (!payload.event_id && !payload.user_id && !payload.group_id) {
-            return "Refusing broad delete: provide event_id, user_id, or current_project_only=true."
+            return "Refusing broad delete: provide event_id or an explicit scoped filter."
           }
 
           const result = await client.deleteMemories(payload)
@@ -176,15 +342,22 @@ const plugin: Plugin = async (input) => {
 
       // Skip storing plugin tool invocations — they create meta-noise in recall
       if (PLUGIN_INVOCATION_RE.test(sanitized)) return
+      const routed = classifyWrite(sanitized, {
+        requestedScope: "auto",
+        enableGlobalScope: config.enableGlobalScope,
+        source: "chat",
+      })
+      rememberLocal(localScopeKey(scopeContext, routed.scope), sanitized, "user", routed.memoryType)
+      maybePromoteProjectProfile(client, config, scopeContext, sanitized, "user", routed)
 
       // Fire-and-forget: store user message in EverMemOS
       client
         .memorize({
           message_id: `${sessionId}-${Date.now()}`,
           create_time: new Date().toISOString(),
-          sender: config.senderId,
+          sender: config.userId,
           content: sanitized,
-          group_id: groupId,
+          group_id: groupIdForScope(scopeContext, routed.scope),
           role: "user",
         })
         .catch(() => {
@@ -199,48 +372,20 @@ const plugin: Plugin = async (input) => {
       const sessionId = hookInput.sessionID
       if (!sessionId) return
 
-      // Use cached query from current message if available; fall back to a
-      // broad default so recall still fires on the very first message of a
-      // fresh session (cache is empty until chat.message populates it).
-      const query =
-        shapeRecallQuery(getCachedUserMessage(sessionId)) ??
-        "project context preferences stack technology"
+      const query = shapeRecallQuery(getCachedUserMessage(sessionId)) || "project context preferences stack technology"
+      const projectContext = await recallProjectContext(client, config, scopeContext, query, config.recallTopK)
+      const globalBlock = await recallGlobalBlocks(
+        client,
+        config,
+        scopeContext,
+        query,
+        config.recallTopK,
+        projectContext.allHits,
+      )
+      const projectBlocks = projectContext.blocks
+      const merged = mergeRecallBlocks(...projectBlocks, globalBlock)
 
-      const localExact = recallLocalExact(groupId, query, config.recallTopK)
-      const localSemantic =
-        localExact.length > 0
-          ? []
-          : recallLocalSemantic(groupId, query, config.recallTopK)
-      const localHits = [...localExact, ...localSemantic]
-
-      const [searchResponse, profileMemories] = await Promise.all([
-        client.search({
-          query,
-          group_id: groupId,
-          retrieve_method: config.retrieveMethod,
-          top_k: config.recallTopK,
-        }),
-        config.injectProfileRecall
-          ? client.listProfileMemories(groupId, config.profileRecallLimit)
-          : Promise.resolve([]),
-      ])
-
-      const episodicBlock =
-        searchResponse && searchResponse.result.total_count > 0
-          ? formatRecalledMemories(searchResponse, query, localHits)
-          : localHits.length > 0
-            ? formatRecalledMemories(
-                { status: "ok", message: "local-only", result: { memories: [], total_count: 0, has_more: false } },
-                query,
-                localHits,
-              )
-            : ""
-      const profileBlock = config.injectProfileRecall
-        ? formatProfileMemories(profileMemories, config.profileRecallLimit)
-        : ""
-      const merged = mergeRecallBlocks(episodicBlock, profileBlock)
-
-      if (merged) output.system.push(merged)
+      if (merged) output.system.push(clipBlock(merged, config.maxInjectedChars))
     },
 
     // ------------------------------------------------------------------
@@ -250,16 +395,7 @@ const plugin: Plugin = async (input) => {
       const query = shapeRecallQuery(getCachedUserMessage(hookInput.sessionID))
       if (!query) return
 
-      const response = await client.search({
-        query,
-        group_id: groupId,
-        retrieve_method: config.retrieveMethod,
-        top_k: Math.min(config.recallTopK, 4),
-      })
-
-      if (!response || response.result.total_count === 0) return
-
-      const compactBlock = formatCompactionMemories(response, 4, 1200, query)
+      const compactBlock = await recallCompactionBlock(client, config, scopeContext, query)
       if (compactBlock) {
         output.context.push(compactBlock)
       }
@@ -280,14 +416,20 @@ const plugin: Plugin = async (input) => {
         config.toolOutputMaxChars,
       )
       const sanitized = sanitize(summary, { maxLength: config.toolOutputMaxChars })
+      const routed = classifyWrite(sanitized, {
+        requestedScope: "project",
+        enableGlobalScope: config.enableGlobalScope,
+        source: "tool",
+      })
+      rememberLocal(localScopeKey(scopeContext, routed.scope), sanitized, "assistant", routed.memoryType)
 
       client
         .memorize({
           message_id: `tool-${hookInput.callID}`,
           create_time: new Date().toISOString(),
-          sender: config.senderId,
+          sender: config.userId,
           content: sanitized,
-          group_id: groupId,
+          group_id: groupIdForScope(scopeContext, routed.scope),
           role: "assistant",
         })
         .catch(() => {

@@ -9,7 +9,7 @@ export function formatRecalledMemories(
   query?: string,
   extraMemories: RecalledMemory[] = [],
 ): string {
-  const flat = selectRecallMemories(response, query, extraMemories)
+  const flat = rankMemoriesForRecall([...extraMemories, ...flattenSearchMemories(response)], query)
   if (flat.length === 0) return ""
 
   const lines = flat.map((m, i) => {
@@ -27,6 +27,32 @@ export function formatRecalledMemories(
   ].join("\n")
 }
 
+export function formatMemorySection(
+  memories: RecalledMemory[],
+  title: string,
+  query?: string,
+  maxLines = 5,
+  maxChars = 1200,
+): string {
+  const ranked = rankMemoriesForRecall(memories, query).slice(0, maxLines)
+  if (ranked.length === 0) return ""
+
+  const lines = ranked.map((m, i) => {
+    const body = toMemoryBody(m)
+    const ts = m.timestamp ? ` (${m.timestamp})` : ""
+    const clipped = body.length > 260 ? `${body.slice(0, 260)}...[truncated]` : body
+    return `${i + 1}. [${m.memory_type}]${ts} ${clipped}`
+  })
+
+  const block = [
+    title,
+    "",
+    ...lines,
+  ].join("\n")
+
+  return block.length > maxChars ? `${block.slice(0, maxChars)}\n...[truncated]` : block
+}
+
 /**
  * Format profile memories fetched from list/get endpoints.
  */
@@ -34,17 +60,19 @@ export function formatProfileMemories(
   memories: RecalledMemory[],
   maxLines = 3,
   maxChars = 1000,
+  title = "## Recalled profile memories",
 ): string {
-  if (memories.length === 0) return ""
+  const unique = dedupeMemories(memories)
+  if (unique.length === 0) return ""
 
-  const lines = memories.slice(0, maxLines).map((m, i) => {
+  const lines = unique.slice(0, maxLines).map((m, i) => {
     const body = (m.summary ?? m.content ?? m.atomic_fact ?? "").replace(/\s+/g, " ").trim()
     const clipped = body.length > 260 ? `${body.slice(0, 260)}...[truncated]` : body
     return `${i + 1}. ${clipped}`
   })
 
   const block = [
-    "## Recalled profile memories",
+    title,
     "",
     ...lines,
   ].join("\n")
@@ -57,6 +85,13 @@ export function mergeRecallBlocks(...blocks: string[]): string {
   return nonEmpty.join("\n\n")
 }
 
+export function clipBlock(block: string, maxChars: number): string {
+  const trimmed = block.trim()
+  if (!trimmed) return ""
+  if (trimmed.length <= maxChars) return trimmed
+  return `${trimmed.slice(0, Math.max(0, maxChars)).trimEnd()}\n...[truncated]`
+}
+
 /**
  * Format compact memory context for compaction prompts.
  * Keeps output brief to avoid competing with compaction instructions.
@@ -67,10 +102,10 @@ export function formatCompactionMemories(
   maxChars = 1200,
   query?: string,
 ): string {
-  const flat = selectRecallMemories(response, query)
+  const flat = rankMemoriesForRecall(flattenSearchMemories(response), query)
   if (flat.length === 0) return ""
 
-  const lines = flat.slice(0, maxLines).map((m) => {
+  const lines = flat.slice(0, maxLines).map((m: RecalledMemory) => {
     const body = toMemoryBody(m)
     const clipped = body.length > 240 ? `${body.slice(0, 240)}...[truncated]` : body
     return `- [${m.memory_type}] ${clipped}`
@@ -141,7 +176,7 @@ export function shapeRecallQuery(raw: string | undefined): string {
 // helpers
 // ---------------------------------------------------------------------------
 
-function flattenMemories(response: SearchMemoriesResponse): RecalledMemory[] {
+export function flattenSearchMemories(response: SearchMemoriesResponse): RecalledMemory[] {
   const out: RecalledMemory[] = []
   for (const group of response.result.memories) {
     for (const memories of Object.values(group)) {
@@ -151,16 +186,15 @@ function flattenMemories(response: SearchMemoriesResponse): RecalledMemory[] {
   return out
 }
 
-function selectRecallMemories(
-  response: SearchMemoriesResponse,
+export function rankMemoriesForRecall(
+  memories: RecalledMemory[],
   query?: string,
-  extraMemories: RecalledMemory[] = [],
 ): RecalledMemory[] {
   const terms = tokenizeQuery(query)
   const allowMeta = queryIsMetaIntent(query ?? "")
   const markerMode = isExactMarkerQuery(query ?? "")
   const exactNeedle = markerMode ? (query ?? "").toLowerCase().trim() : ""
-  const all = [...extraMemories, ...flattenMemories(response)]
+  const all = dedupeMemories(memories)
   const strict = scoreAndFilter(all, terms, allowMeta, markerMode, exactNeedle, true)
   if (strict.length > 0) return strict
 
@@ -174,6 +208,36 @@ function selectRecallMemories(
 
   // Safety fallback for semantic query: avoid returning pure tool/meta chatter.
   return fallbackSemanticDedup(all, terms)
+}
+
+export function dedupeMemories(memories: RecalledMemory[]): RecalledMemory[] {
+  const seen = new Set<string>()
+  const out: RecalledMemory[] = []
+
+  for (const memory of memories) {
+    const body = toMemoryBody(memory)
+    const key = normalizeForDedup(body)
+    if (!key || seen.has(key)) continue
+    seen.add(key)
+    out.push(memory)
+  }
+
+  return out
+}
+
+export function excludeMemories(
+  memories: RecalledMemory[],
+  excluded: RecalledMemory[],
+): RecalledMemory[] {
+  const excludedKeys = new Set(excluded.map((memory) => memoryDedupKey(memory)).filter(Boolean))
+  return memories.filter((memory) => {
+    const key = memoryDedupKey(memory)
+    return key ? !excludedKeys.has(key) : true
+  })
+}
+
+export function memoryDedupKey(memory: RecalledMemory): string {
+  return normalizeForDedup(toMemoryBody(memory))
 }
 
 function scoreMemory(

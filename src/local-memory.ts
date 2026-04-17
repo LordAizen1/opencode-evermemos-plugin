@@ -1,59 +1,62 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
-import type { RecalledMemory } from "./types.js"
+import type { MemoryKind, RecalledMemory } from "./types.js"
 
 type LocalRole = "user" | "assistant"
 
 interface LocalMemoryEntry {
   content: string
   role: LocalRole
+  memoryType?: MemoryKind
   createdAt: string
 }
 
 interface LocalMemoryStore {
-  version: 1
-  groups: Record<string, LocalMemoryEntry[]>
+  version: 2
+  spaces: Record<string, LocalMemoryEntry[]>
 }
 
 const DEFAULT_STORE_PATH = join(homedir(), ".config", "opencode", "evermemos-local.json")
 const MAX_PER_GROUP = 300
 
 export function rememberLocal(
-  groupId: string,
+  spaceKey: string,
   content: string,
   role: LocalRole,
+  memoryType?: MemoryKind,
 ): void {
-  if (!groupId || !content) return
+  if (!spaceKey || !content) return
   const store = loadStore()
-  const list = store.groups[groupId] ?? []
+  const list = store.spaces[spaceKey] ?? []
 
   list.push({
     content,
     role,
+    memoryType,
     createdAt: new Date().toISOString(),
   })
 
   if (list.length > MAX_PER_GROUP) {
-    store.groups[groupId] = list.slice(-MAX_PER_GROUP)
+    store.spaces[spaceKey] = list.slice(-MAX_PER_GROUP)
   } else {
-    store.groups[groupId] = list
+    store.spaces[spaceKey] = list
   }
 
   saveStore(store)
 }
 
 export function recallLocalExact(
-  groupId: string,
+  spaceKey: string,
   query: string,
   limit: number,
 ): RecalledMemory[] {
-  if (!groupId) return []
+  if (!spaceKey) return []
   const q = query.trim()
   if (!q || !isExactTokenQuery(q)) return []
 
   const store = loadStore()
-  const list = store.groups[groupId] ?? []
+  const list = store.spaces[spaceKey] ?? []
   if (list.length === 0) return []
 
   const needle = q.toLowerCase()
@@ -63,19 +66,19 @@ export function recallLocalExact(
     .reverse()
 
   return hits.map((m) => ({
-    memory_type: "local_memory",
+    memory_type: m.memoryType ?? "local_memory",
     content: m.content,
     timestamp: m.createdAt,
-    group_id: groupId,
+    group_id: spaceKey,
   }))
 }
 
 export function recallLocalSemantic(
-  groupId: string,
+  spaceKey: string,
   query: string,
   limit: number,
 ): RecalledMemory[] {
-  if (!groupId) return []
+  if (!spaceKey) return []
   const q = query.trim()
   if (!q) return []
 
@@ -83,7 +86,7 @@ export function recallLocalSemantic(
   if (terms.length === 0) return []
 
   const store = loadStore()
-  const list = store.groups[groupId] ?? []
+  const list = store.spaces[spaceKey] ?? []
   if (list.length === 0) return []
 
   const scored = list
@@ -103,11 +106,48 @@ export function recallLocalSemantic(
     .slice(0, Math.max(1, limit))
 
   return scored.map((x) => ({
-    memory_type: "local_memory",
+    memory_type: x.m.memoryType ?? "local_memory",
     content: x.m.content,
     timestamp: x.m.createdAt,
-    group_id: groupId,
+    group_id: spaceKey,
   }))
+}
+
+export function hasLocalMemory(
+  spaceKey: string,
+  content: string,
+  memoryType?: MemoryKind,
+): boolean {
+  if (!spaceKey || !content) return false
+  const store = loadStore()
+  const list = store.spaces[spaceKey] ?? []
+  const needle = normalizeMemoryKey(content)
+  if (!needle) return false
+
+  return list.some((entry) => {
+    if (memoryType && entry.memoryType && entry.memoryType !== memoryType) return false
+    return normalizeMemoryKey(entry.content) === needle
+  })
+}
+
+export function countProjectSpacesWithMemory(
+  content: string,
+  memoryType?: MemoryKind,
+): number {
+  const needle = normalizeMemoryKey(content)
+  if (!needle) return 0
+
+  const store = loadStore()
+  let matches = 0
+  for (const [spaceKey, entries] of Object.entries(store.spaces)) {
+    if (!spaceKey.startsWith("project:")) continue
+    const found = entries.some((entry) => {
+      if (memoryType && entry.memoryType && entry.memoryType !== memoryType) return false
+      return normalizeMemoryKey(entry.content) === needle
+    })
+    if (found) matches++
+  }
+  return matches
 }
 
 function isExactTokenQuery(query: string): boolean {
@@ -129,6 +169,14 @@ function containsPreferenceCue(text: string): boolean {
   return /\b(prefer|preference|style|stack|uses|tech|convention|refactor|commit)\b/.test(text)
 }
 
+function normalizeMemoryKey(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
 function getStorePath(): string {
   return process.env.EVERMEMOS_LOCAL_STORE_PATH || DEFAULT_STORE_PATH
 }
@@ -136,15 +184,28 @@ function getStorePath(): string {
 function loadStore(): LocalMemoryStore {
   const path = getStorePath()
   try {
-    if (!existsSync(path)) return { version: 1, groups: {} }
+    if (!existsSync(path)) return { version: 2, spaces: {} }
     const raw = readFileSync(path, "utf8")
-    const parsed = JSON.parse(raw) as Partial<LocalMemoryStore>
-    if (!parsed || parsed.version !== 1 || typeof parsed.groups !== "object" || !parsed.groups) {
-      return { version: 1, groups: {} }
+    const parsed = JSON.parse(raw) as Partial<LocalMemoryStore> & { groups?: Record<string, LocalMemoryEntry[]> }
+    if (!parsed || typeof parsed !== "object") {
+      return { version: 2, spaces: {} }
     }
-    return { version: 1, groups: parsed.groups }
+
+    if (parsed.version === 2 && typeof parsed.spaces === "object" && parsed.spaces) {
+      return { version: 2, spaces: parsed.spaces }
+    }
+
+    if (typeof parsed.groups === "object" && parsed.groups) {
+      const migratedSpaces: Record<string, LocalMemoryEntry[]> = {}
+      for (const [groupId, entries] of Object.entries(parsed.groups)) {
+        migratedSpaces[`project:${groupId}`] = Array.isArray(entries) ? entries : []
+      }
+      return { version: 2, spaces: migratedSpaces }
+    }
+
+    return { version: 2, spaces: {} }
   } catch {
-    return { version: 1, groups: {} }
+    return { version: 2, spaces: {} }
   }
 }
 

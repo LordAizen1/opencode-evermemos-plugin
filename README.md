@@ -4,6 +4,9 @@ Durable project and user memory for OpenCode using EverMemOS.
 
 The plugin captures sanitized user and tool context, stores it in EverMemOS, and automatically recalls relevant memories into the system prompt on every turn — no explicit commands needed. Memory is split into project scope for repo-specific continuity and global scope for user-wide preferences.
 
+<!-- Replace the URL below with your hosted GIF after recording -->
+![cross-project memory demo](https://via.placeholder.com/800x400?text=Demo+GIF+coming+soon)
+
 ## Why EverMemOS
 
 Most OpenCode memory plugins (opencode-mem, opencode-supermemory, opencode-mem0) store raw text in a vector database and retrieve it by similarity. EverMemOS does something fundamentally different — it runs an LLM extraction pipeline over your conversations and produces structured memory types:

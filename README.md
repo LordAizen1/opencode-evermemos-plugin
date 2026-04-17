@@ -96,9 +96,21 @@ docker compose up -d
 
 > Add `restart: unless-stopped` to each service in `docker-compose.yml` so the backend starts automatically with Docker on every boot — you won't have to think about it again.
 
-Then start the EverMemOS API server:
+Install `uv` if you don't have it:
 
 ```bash
+# Linux/macOS
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Windows (PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+Then install dependencies and start the EverMemOS API server:
+
+```bash
+uv sync
+
 # Linux/macOS
 uv run python src/run.py --port 1995
 
@@ -106,6 +118,8 @@ uv run python src/run.py --port 1995
 $env:PYTHONIOENCODING="utf-8"
 py -m uv run python src/run.py --port 1995
 ```
+
+> **Memory:** Running all EverMemOS Docker containers (MongoDB, Elasticsearch, Milvus, Redis) requires at least 8GB of free RAM. Milvus alone uses 2–4GB. If you're tight on memory, stop Milvus (`docker compose stop milvus-standalone milvus-minio milvus-etcd`) — keyword and hybrid retrieval will fall back gracefully.
 
 **OpenAI compatibility note:** If using `LLM_BASE_URL=https://api.openai.com/v1`, ensure the `"provider"` field in `src/memory_layer/llm/openai_provider.py` is only sent for OpenRouter URLs. The OpenAI API rejects unknown fields with HTTP 400.
 
@@ -258,6 +272,38 @@ Plugin tool calls (`evermemos_recall`, `evermemos_remember`, `evermemos_forget`)
 8. Test explicit tools: `evermemos_remember`, `evermemos_recall`, `evermemos_forget`.
 9. Send a message containing `<private>secret</private>` and confirm it is not stored.
 10. Stop EverMemOS and verify chat continues without crashing (fail-open).
+
+## Windows setup notes
+
+### Fix 1 — Use `127.0.0.1` instead of `localhost` in EverMemOS `.env`
+
+On Windows, `localhost` resolves to `::1` (IPv6) but Docker containers bind to `0.0.0.0` (IPv4 only). This causes silent connection timeouts. Open your EverMemOS `.env` and replace every `localhost` with `127.0.0.1`:
+
+```dotenv
+MONGODB_HOST=127.0.0.1
+REDIS_HOST=127.0.0.1
+ES_HOSTS=http://127.0.0.1:19200
+MILVUS_HOST=127.0.0.1
+```
+
+### Fix 2 — Elasticsearch keystore corruption on Docker Desktop
+
+Docker Desktop on Windows can corrupt the Elasticsearch keystore on container restart, causing a `read past EOF` startup crash. Fix it by adding a startup command to the `elasticsearch` service in EverMemOS `docker-compose.yaml`:
+
+```yaml
+elasticsearch:
+  ...
+  command: >
+    bash -c "
+      rm -f /usr/share/elasticsearch/config/elasticsearch.keystore &&
+      elasticsearch-keystore create &&
+      exec /usr/local/bin/docker-entrypoint.sh eswrapper
+    "
+```
+
+This deletes and recreates the keystore on every container start. Safe to run repeatedly.
+
+After making either change, run `docker compose down && docker compose up -d` to apply.
 
 ## Privacy behavior
 
